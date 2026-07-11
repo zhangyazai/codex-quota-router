@@ -525,6 +525,10 @@
       margin-top: 0.85rem;
     }
 
+    .account-http-warning {
+      margin: 1rem 1rem 0;
+    }
+
     .account-card-head {
       min-width: 0;
       display: grid;
@@ -938,7 +942,6 @@
     </section>
 
     <div class="notice danger" id="globalNotice" role="alert" tabindex="-1" hidden></div>
-    <div class="notice warning" id="persistentHttpWarning" role="note" hidden></div>
     <div class="visually-hidden" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
 
     <dl class="summary-grid" aria-label="路由状态摘要">
@@ -1066,6 +1069,8 @@
 
   <template id="accountTemplate">
     <li class="account-card">
+      <div class="notice warning account-http-warning" data-slot="http-warning" role="note" hidden></div>
+
       <div class="account-card-head">
         <div class="priority-number" data-slot="priority" aria-label="优先级"></div>
         <div class="account-heading">
@@ -1280,7 +1285,6 @@
         main: document.getElementById("main"),
         serviceState: document.getElementById("serviceState"),
         globalNotice: document.getElementById("globalNotice"),
-        persistentHttpWarning: document.getElementById("persistentHttpWarning"),
         liveRegion: document.getElementById("liveRegion"),
         summaryStrategy: document.getElementById("summaryStrategy"),
         summaryAccounts: document.getElementById("summaryAccounts"),
@@ -1480,25 +1484,6 @@
         }
       }
 
-      function updatePersistentHTTPWarning() {
-        var insecure = config.accounts.filter(function (account) {
-          return account.baseUrl.trim().toLowerCase().indexOf("http://") === 0;
-        });
-        if (insecure.length === 0) {
-          setHiddenIfChanged(elements.persistentHttpWarning, true);
-          setTextIfChanged(elements.persistentHttpWarning, "");
-          return;
-        }
-        var names = insecure.slice(0, 3).map(function (account) {
-          return account.name.trim() || "未命名账号";
-        });
-        var subject = names.join("、") + (insecure.length > names.length ? " 等 " + insecure.length + " 个账号" : "");
-        setTextIfChanged(elements.persistentHttpWarning,
-          "安全风险：当前已保存配置中的 " + subject + " 使用明文 HTTP。API Key、余额认证凭据、提示词、代码和响应可能被窃听；建议尽快改用 HTTPS。"
-        );
-        setHiddenIfChanged(elements.persistentHttpWarning, false);
-      }
-
       function markDirty() {
         if (!dirty) {
           dirty = true;
@@ -1663,6 +1648,15 @@
                 : "该认证方式尚未保存秘密；保存前必须填写。")));
       }
 
+      function updateAccountHTTPWarning(card, account) {
+        var warning = card.querySelector('[data-slot="http-warning"]');
+        var insecure = account.baseUrl.trim().toLowerCase().indexOf("http://") === 0;
+        setTextIfChanged(warning, insecure
+          ? "安全风险：" + (account.name.trim() || "此账号") + " 使用明文 HTTP。路由请求时，API Key、余额认证凭据、提示词、代码和响应可能被窃听；建议尽快改用 HTTPS。"
+          : "");
+        setHiddenIfChanged(warning, !insecure);
+      }
+
       function renderAccounts() {
         elements.accountList.replaceChildren();
         elements.emptyState.hidden = config.accounts.length !== 0;
@@ -1757,6 +1751,7 @@
           card.querySelector('[data-action="move-down"]').disabled = index === config.accounts.length - 1;
           card.querySelector('[data-action="reset"]').disabled = getStatusAccount(account.id) === null;
           updateAccountControlLabels(card, account, index);
+          updateAccountHTTPWarning(card, account);
 
           elements.accountList.appendChild(card);
           updateAccountStatus(card, account);
@@ -2218,7 +2213,6 @@
           elements.testModel.value = config.testModel;
           renderAccounts();
           updateStrategyDescription();
-          updatePersistentHTTPWarning();
           markClean();
           setServiceState("online", "服务在线");
         } catch (error) {
@@ -2270,11 +2264,6 @@
           return;
         }
         var insecureURLs = httpURLs(accounts);
-        var confirmed = await confirmHTTPRisk(insecureURLs);
-        if (!confirmed) {
-          announce("已取消保存");
-          return;
-        }
 
         var restoreButton = setButtonBusy(elements.saveButton, "正在保存…");
         var outcome = "";
@@ -2300,7 +2289,6 @@
           elements.testModel.value = config.testModel;
           renderAccounts();
           updateStrategyDescription();
-          updatePersistentHTTPWarning();
           markClean();
           setServiceState("online", "服务在线");
           outcome = data.message || "全部配置已保存";
@@ -2782,6 +2770,7 @@
             field === "clearNewApiSecret" || field === "newApiSecret") {
           updateNewAPIAuthFields(card, account);
         }
+        updateAccountHTTPWarning(card, account);
         updateAccountStatus(card, account);
         markDirty();
       }
