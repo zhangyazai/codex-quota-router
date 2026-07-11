@@ -1,0 +1,2612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Codex Quota Router</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fa;
+      --surface: #ffffff;
+      --surface-soft: #f7f9fc;
+      --surface-strong: #edf3fa;
+      --text: #152033;
+      --muted: #536176;
+      --border: #d3ddea;
+      --border-strong: #aebdd0;
+      --accent: #0868c2;
+      --accent-hover: #0557a3;
+      --accent-soft: #e5f1ff;
+      --on-accent: #ffffff;
+      --success: #116b3b;
+      --success-soft: #e4f5eb;
+      --warning: #854707;
+      --warning-soft: #fff2d3;
+      --danger: #ad261d;
+      --danger-hover: #8e1d16;
+      --danger-soft: #ffefed;
+      --focus: #1774d1;
+      --scrim: rgba(10, 18, 31, 0.58);
+      --shadow: 0 12px 32px rgba(30, 48, 76, 0.08);
+      --radius: 16px;
+      --radius-small: 10px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0a1120;
+        --surface: #111a2c;
+        --surface-soft: #172238;
+        --surface-strong: #1c2a43;
+        --text: #f1f5fb;
+        --muted: #afbbcd;
+        --border: #33435c;
+        --border-strong: #536782;
+        --accent: #78baff;
+        --accent-hover: #9bcdff;
+        --accent-soft: #173858;
+        --on-accent: #071423;
+        --success: #72d49b;
+        --success-soft: #173b2a;
+        --warning: #ffca70;
+        --warning-soft: #422e12;
+        --danger: #ff9c93;
+        --danger-hover: #ffc0ba;
+        --danger-soft: #4b211f;
+        --focus: #8bc6ff;
+        --scrim: rgba(0, 0, 0, 0.72);
+        --shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+      background: var(--bg);
+    }
+
+    body {
+      min-height: 100dvh;
+      margin: 0;
+      overflow-x: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top right, color-mix(in srgb, var(--accent) 8%, transparent), transparent 34rem),
+        var(--bg);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button,
+    select,
+    input[type="text"],
+    input[type="url"],
+    input[type="password"] {
+      min-height: 44px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: var(--radius-small);
+      padding: 0.62rem 0.95rem;
+      cursor: pointer;
+      font-weight: 680;
+      touch-action: manipulation;
+      transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, opacity 180ms ease;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    button:not(:disabled):active {
+      opacity: 0.76;
+    }
+
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 0.75rem;
+      left: 0.75rem;
+      padding: 0.65rem 0.9rem;
+      border-radius: 8px;
+      color: #ffffff;
+      background: #172033;
+      transform: translateY(-160%);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .topbar {
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+    }
+
+    .topbar-inner,
+    main,
+    footer {
+      width: min(1160px, calc(100% - 2rem));
+      margin-inline: auto;
+    }
+
+    .topbar-inner {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .brand {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 10px;
+      color: #ffffff;
+      background: #0868c2;
+      font-weight: 850;
+      letter-spacing: -0.06em;
+    }
+
+    .brand-name {
+      overflow: hidden;
+      font-weight: 780;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .service-state,
+    .tag,
+    .dirty-state {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.42rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.2rem 0.65rem;
+      color: var(--muted);
+      background: var(--surface-soft);
+      font-size: 0.875rem;
+      font-weight: 680;
+      line-height: 1.3;
+    }
+
+    .service-state,
+    .tag {
+      white-space: nowrap;
+    }
+
+    .service-state::before,
+    .tag::before {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: currentColor;
+      content: "";
+    }
+
+    .service-state[data-state="online"],
+    .tag.success {
+      color: var(--success);
+      border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+      background: var(--success-soft);
+    }
+
+    .service-state[data-state="offline"],
+    .tag.danger {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+      background: var(--danger-soft);
+    }
+
+    .tag.warning,
+    .dirty-state {
+      color: var(--warning);
+      border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+      background: var(--warning-soft);
+    }
+
+    main {
+      padding-block: 2.25rem 1rem;
+    }
+
+    h1,
+    h2,
+    h3,
+    p,
+    dl,
+    dd {
+      margin-top: 0;
+    }
+
+    h1 {
+      margin-bottom: 0.55rem;
+      font-size: clamp(1.75rem, 5vw, 2.65rem);
+      line-height: 1.15;
+      letter-spacing: -0.035em;
+    }
+
+    h2 {
+      margin-bottom: 0;
+      font-size: 1.22rem;
+      line-height: 1.3;
+    }
+
+    h3 {
+      margin-bottom: 0.15rem;
+      font-size: 1.05rem;
+      line-height: 1.35;
+    }
+
+    .intro {
+      max-width: 780px;
+      margin-bottom: 1.5rem;
+    }
+
+    .intro p,
+    .helper,
+    .muted {
+      color: var(--muted);
+    }
+
+    .intro p {
+      margin-bottom: 0;
+      font-size: 1.03rem;
+    }
+
+    .notice {
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-small);
+      padding: 0.8rem 0.95rem;
+      overflow-wrap: anywhere;
+    }
+
+    .notice.info {
+      color: var(--text);
+      border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+      background: var(--accent-soft);
+    }
+
+    .notice.warning {
+      color: var(--warning);
+      border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+      background: var(--warning-soft);
+    }
+
+    .notice.danger {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+      background: var(--danger-soft);
+    }
+
+    .notice[hidden],
+    [hidden] {
+      display: none !important;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .summary-item {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-small);
+      padding: 0.9rem;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .summary-item dt {
+      margin-bottom: 0.3rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .summary-item dd {
+      margin-bottom: 0;
+      overflow-wrap: anywhere;
+      font-size: 1.02rem;
+      font-weight: 760;
+    }
+
+    .panel {
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .panel-head {
+      min-width: 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.1rem;
+    }
+
+    .panel-head p {
+      margin: 0.28rem 0 0;
+      color: var(--muted);
+    }
+
+    .panel-body {
+      padding: 1.1rem;
+    }
+
+    .toolbar,
+    .button-row,
+    .card-actions,
+    .form-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.55rem;
+    }
+
+    .toolbar {
+      justify-content: flex-end;
+    }
+
+    .primary {
+      color: var(--on-accent);
+      background: var(--accent);
+    }
+
+    .primary:not(:disabled):hover {
+      background: var(--accent-hover);
+    }
+
+    .secondary {
+      color: var(--text);
+      border-color: var(--border-strong);
+      background: var(--surface);
+    }
+
+    .secondary:not(:disabled):hover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .ghost {
+      color: var(--accent);
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .ghost:not(:disabled):hover {
+      background: var(--accent-soft);
+    }
+
+    .danger-button {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+      background: var(--surface);
+    }
+
+    .danger-button:not(:disabled):hover {
+      color: var(--danger-hover);
+      background: var(--danger-soft);
+    }
+
+    .strategy-grid {
+      display: grid;
+      grid-template-columns: minmax(230px, 0.8fr) minmax(260px, 1.2fr);
+      align-items: start;
+      gap: 1rem;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field + .field {
+      margin-top: 0.95rem;
+    }
+
+    .field label,
+    .field-label {
+      display: block;
+      margin-bottom: 0.38rem;
+      font-weight: 700;
+    }
+
+    input[type="text"],
+    input[type="url"],
+    input[type="password"],
+    select {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-small);
+      padding: 0.6rem 0.72rem;
+      color: var(--text);
+      background: var(--surface);
+    }
+
+    input::placeholder {
+      color: color-mix(in srgb, var(--muted) 82%, transparent);
+    }
+
+    input[aria-invalid="true"],
+    select[aria-invalid="true"] {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 1px var(--danger);
+    }
+
+    .helper {
+      margin: 0.35rem 0 0;
+      font-size: 0.88rem;
+      overflow-wrap: anywhere;
+    }
+
+    .field-error {
+      margin: 0.3rem 0 0;
+      color: var(--danger);
+      font-size: 0.88rem;
+      font-weight: 650;
+    }
+
+    .check-row {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.58rem;
+      cursor: pointer;
+      font-weight: 650;
+      touch-action: manipulation;
+    }
+
+    .check-row input {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .accounts-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: account;
+    }
+
+    .account-card {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      counter-increment: account;
+    }
+
+    .account-card + .account-card {
+      margin-top: 0.85rem;
+    }
+
+    .account-card-head {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.85rem;
+      padding: 1rem;
+    }
+
+    .priority-number {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-variant-numeric: tabular-nums;
+      font-weight: 800;
+    }
+
+    .account-heading {
+      min-width: 0;
+    }
+
+    .account-name {
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-size: 1.08rem;
+    }
+
+    .account-subline {
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.4rem 0.7rem;
+      margin-top: 0.3rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .account-url {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .enabled-control {
+      justify-self: end;
+    }
+
+    .account-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0;
+      margin: 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-soft);
+    }
+
+    .account-summary > div {
+      min-width: 0;
+      padding: 0.75rem 1rem;
+    }
+
+    .account-summary > div + div {
+      border-left: 1px solid var(--border);
+    }
+
+    .account-summary dt {
+      margin-bottom: 0.22rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .account-summary dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-size: 0.9rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 680;
+    }
+
+    .account-card-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      padding: 0.65rem 1rem;
+    }
+
+    .account-editor {
+      border-top: 1px solid var(--border);
+      padding: 1rem;
+      background: color-mix(in srgb, var(--surface-soft) 55%, var(--surface));
+    }
+
+    .editor-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .editor-grid .field + .field {
+      margin-top: 0;
+    }
+
+    .full-width {
+      grid-column: 1 / -1;
+    }
+
+    .key-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 0.75rem;
+    }
+
+    .test-result {
+      min-height: 1.6rem;
+      margin: 0.75rem 0 0;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      font-size: 0.9rem;
+    }
+
+    .test-result.success {
+      color: var(--success);
+    }
+
+    .test-result.danger {
+      color: var(--danger);
+    }
+
+    .empty-state {
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--radius);
+      padding: 2rem 1rem;
+      text-align: center;
+      color: var(--muted);
+      background: var(--surface-soft);
+    }
+
+    .empty-state p {
+      margin-bottom: 0.8rem;
+    }
+
+    .save-bar {
+      position: sticky;
+      z-index: 10;
+      bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-top: 1rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 0.75rem;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      box-shadow: 0 14px 38px rgba(21, 32, 51, 0.17);
+      backdrop-filter: blur(12px);
+    }
+
+    pre {
+      max-width: 100%;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-small);
+      padding: 0.9rem;
+      color: var(--text);
+      background: var(--surface-soft);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font: 0.88rem/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    dialog {
+      width: min(520px, calc(100% - 2rem));
+      max-height: calc(100dvh - 2rem);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 0;
+      color: var(--text);
+      background: var(--surface);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+    }
+
+    dialog::backdrop {
+      background: var(--scrim);
+    }
+
+    .dialog-body {
+      padding: 1.1rem;
+    }
+
+    .dialog-body h2 {
+      margin-bottom: 0.55rem;
+    }
+
+    .dialog-body ul {
+      max-height: 10rem;
+      margin: 0.75rem 0;
+      padding-left: 1.3rem;
+      overflow: auto;
+    }
+
+    .dialog-body li {
+      overflow-wrap: anywhere;
+    }
+
+    .dialog-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.6rem;
+      border-top: 1px solid var(--border);
+      padding: 0.85rem 1.1rem;
+    }
+
+    footer {
+      padding-block: 1rem 2.2rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+      text-align: center;
+    }
+
+    .visually-hidden {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
+
+    @media (max-width: 820px) {
+      .summary-grid,
+      .account-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .account-summary > div:nth-child(3) {
+        border-left: 0;
+        border-top: 1px solid var(--border);
+      }
+
+      .account-summary > div:nth-child(4) {
+        border-top: 1px solid var(--border);
+      }
+
+      .strategy-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .topbar-inner,
+      main,
+      footer {
+        width: min(100% - 1rem, 1160px);
+      }
+
+      main {
+        padding-top: 1.4rem;
+      }
+
+      .brand-name {
+        max-width: 52vw;
+      }
+
+      .panel-head {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .toolbar {
+        justify-content: flex-start;
+      }
+
+      .account-card-head {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      .enabled-control {
+        grid-column: 1 / -1;
+        justify-self: start;
+      }
+
+      .editor-grid,
+      .key-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .save-bar {
+        position: static;
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .save-bar .form-actions,
+      .save-bar button {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 390px) {
+      .summary-grid,
+      .account-summary {
+        grid-template-columns: 1fr;
+      }
+
+      .account-summary > div + div,
+      .account-summary > div:nth-child(3) {
+        border-top: 1px solid var(--border);
+        border-left: 0;
+      }
+
+      .account-card-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .account-card-toolbar .button-row,
+      .account-card-toolbar button {
+        width: 100%;
+      }
+
+      .card-actions,
+      .card-actions button {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">CQ</div>
+        <div class="brand-name">Codex Quota Router</div>
+      </div>
+      <span class="service-state" id="serviceState" data-state="loading" role="status">正在连接</span>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1" aria-busy="true" inert>
+    <section class="intro" aria-labelledby="pageTitle">
+      <h1 id="pageTitle">多账号 Key 池</h1>
+      <p>集中管理多个上游账号，按优先级、轮询、最少使用或最高余额规则自动路由 Codex 请求。</p>
+    </section>
+
+    <div class="notice danger" id="globalNotice" role="alert" tabindex="-1" hidden></div>
+    <div class="notice warning" id="persistentHttpWarning" role="note" hidden></div>
+    <div class="visually-hidden" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
+
+    <dl class="summary-grid" aria-label="路由状态摘要">
+      <div class="summary-item">
+        <dt>当前策略</dt>
+        <dd id="summaryStrategy">—</dd>
+      </div>
+      <div class="summary-item">
+        <dt>可用账号</dt>
+        <dd id="summaryAccounts">—</dd>
+      </div>
+      <div class="summary-item">
+        <dt>最近路由</dt>
+        <dd id="summaryLastAccount">尚无请求</dd>
+      </div>
+      <div class="summary-item">
+        <dt>配置状态</dt>
+        <dd><span class="dirty-state" id="dirtyState" hidden>有未保存更改</span><span id="savedState">已同步</span></dd>
+      </div>
+    </dl>
+
+    <section class="panel" aria-labelledby="strategyTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="strategyTitle">路由规则</h2>
+          <p>规则应用于所有已启用且当前可用的账号。</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="strategy-grid">
+          <div>
+            <div class="field">
+              <label for="strategy">分配策略</label>
+              <select id="strategy" aria-describedby="strategyHelp strategyContinuityWarning">
+                <option value="priority">按优先级顺序</option>
+                <option value="round_robin">轮询使用</option>
+                <option value="least_used">最少使用优先</option>
+                <option value="highest_balance">余额最多优先</option>
+              </select>
+              <p class="helper" id="strategyHelp"></p>
+            </div>
+            <div class="field">
+              <label for="testModel">连通性测试模型</label>
+              <input id="testModel" type="text" autocomplete="off" spellcheck="false" placeholder="例如 gpt-5" aria-describedby="testModelHelp">
+              <p class="helper" id="testModelHelp">仅用于“测试”按钮，不改变 Codex 实际请求中的模型。</p>
+            </div>
+          </div>
+          <div>
+            <div class="notice info" id="effectiveStrategyNotice" role="status"></div>
+            <div class="notice warning" id="fallbackWarning" role="status" hidden></div>
+            <div class="notice warning" id="strategyContinuityWarning" role="note">
+              任何策略都可能在额度耗尽、认证失败或限流时故障切换账号；轮询、最少使用和余额策略还可能主动切换。使用 Responses API 的 <code>previous_response_id</code> 时，上下文 ID 通常不能跨不共享响应存储的账号或上游复用。
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="accountsTitle">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="accountsTitle">账号列表</h2>
+            <p>列表顺序就是优先级顺序；最上方账号优先级最高。</p>
+            <p id="balanceRefreshResult">余额每 60 秒自动刷新（仅页面可见时）。</p>
+          </div>
+          <div class="toolbar">
+            <button class="secondary" id="refreshBalancesButton" type="button">刷新全部余额</button>
+            <button class="primary" id="addAccountButton" type="button">添加账号</button>
+          </div>
+        </div>
+      </div>
+
+      <ol class="accounts-list" id="accountList" aria-label="按优先级排序的账号"></ol>
+
+      <div class="empty-state" id="emptyState" hidden>
+        <p>还没有账号。添加第一个账号后即可配置路由。</p>
+        <button class="primary" id="emptyAddButton" type="button">添加账号</button>
+      </div>
+    </section>
+
+    <div class="save-bar" aria-label="配置保存操作">
+      <div>
+        <strong>所有修改一次保存</strong>
+        <div class="helper">Key 留空会保留服务器中已保存的值。</div>
+      </div>
+      <div class="form-actions">
+        <button class="secondary" id="reloadButton" type="button">放弃更改并重新加载</button>
+        <button class="primary" id="saveButton" type="button">保存全部配置</button>
+      </div>
+    </div>
+
+    <section class="panel" aria-labelledby="codexTitle" style="margin-top: 1.5rem;">
+      <div class="panel-head">
+        <div>
+          <h2 id="codexTitle">Codex 用户级配置</h2>
+          <p>将下面内容写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
+        </div>
+        <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
+      </div>
+      <div class="panel-body">
+        <pre id="codexSnippet" aria-label="Codex config.toml 配置内容">正在加载…</pre>
+        <p class="helper" style="margin-bottom: 0;">这是当前用户的配置文件，不需要修改系统级配置。若文件已有其他设置，请合并内容，不要整份覆盖。</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>管理页面仅监听本机地址；账号 Key 不会在页面中回显。</footer>
+
+  <dialog id="httpRiskDialog" aria-labelledby="httpRiskTitle" aria-describedby="httpRiskDescription">
+    <form method="dialog">
+      <div class="dialog-body">
+        <h2 id="httpRiskTitle">确认使用明文 HTTP</h2>
+        <p id="httpRiskDescription">以下地址不是 HTTPS。API Key、提示词、代码和响应可能以明文经过网络，请只在你明确了解风险时继续。</p>
+        <ul id="httpRiskList"></ul>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary" value="cancel" type="submit">取消</button>
+        <button class="danger-button" value="confirm" type="submit">了解风险并继续</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="accountTemplate">
+    <li class="account-card">
+      <div class="account-card-head">
+        <div class="priority-number" data-slot="priority" aria-label="优先级"></div>
+        <div class="account-heading">
+          <h3 class="account-name" data-slot="name"></h3>
+          <div class="account-subline">
+            <span class="tag" data-slot="state">状态未知</span>
+            <span class="account-url" data-slot="url"></span>
+          </div>
+        </div>
+        <label class="check-row enabled-control">
+          <input type="checkbox" data-field="enabled">
+          <span>启用</span>
+        </label>
+      </div>
+
+      <dl class="account-summary">
+        <div>
+          <dt>余额</dt>
+          <dd data-slot="balance">未知（尚未刷新）</dd>
+        </div>
+        <div>
+          <dt>已分配请求</dt>
+          <dd data-slot="requests">0</dd>
+        </div>
+        <div>
+          <dt>最近使用</dt>
+          <dd data-slot="last-used">尚未使用</dd>
+        </div>
+        <div>
+          <dt>验证 / 冷却</dt>
+          <dd data-slot="health">待验证</dd>
+        </div>
+      </dl>
+
+      <div class="account-card-toolbar">
+        <div class="button-row">
+          <button class="secondary" type="button" data-action="edit" aria-expanded="false">编辑账号</button>
+          <button class="ghost" type="button" data-action="move-up">上移</button>
+          <button class="ghost" type="button" data-action="move-down">下移</button>
+        </div>
+        <span class="helper" data-slot="key-state"></span>
+      </div>
+
+      <div class="account-editor" data-slot="editor" hidden>
+        <div class="editor-grid">
+          <div class="field">
+            <label data-label="name">账号名称</label>
+            <input type="text" data-field="name" autocomplete="off" maxlength="100">
+            <p class="field-error" data-error="name" hidden></p>
+          </div>
+          <div class="field">
+            <label data-label="baseUrl">上游 Base URL</label>
+            <input type="url" data-field="baseUrl" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/v1">
+            <p class="helper" data-helper="baseUrl">必须是完整的 <code>http://</code> 或 <code>https://</code> 地址。</p>
+            <p class="field-error" data-error="baseUrl" hidden></p>
+          </div>
+          <div class="field full-width">
+            <div class="key-layout">
+              <div>
+                <label data-label="apiKey">API Key</label>
+                <input type="password" data-field="apiKey" autocomplete="new-password" spellcheck="false">
+                <p class="helper" data-slot="key-help" data-helper="apiKey"></p>
+                <p class="field-error" data-error="apiKey" hidden></p>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" data-field="clearApiKey">
+                <span>清除已保存的 Key</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-actions" style="margin-top: 1rem;">
+          <button class="primary" type="button" data-action="test">测试当前填写内容</button>
+          <button class="secondary" type="button" data-action="reset">恢复账号状态</button>
+          <button class="danger-button" type="button" data-action="delete">删除账号</button>
+        </div>
+        <p class="test-result" data-slot="test-result" role="status"></p>
+      </div>
+    </li>
+  </template>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var strategyLabels = {
+        priority: "按优先级顺序",
+        round_robin: "轮询使用",
+        least_used: "最少使用优先",
+        highest_balance: "余额最多优先"
+      };
+
+      var strategyDescriptions = {
+        priority: "从列表顶部开始选择第一个已启用且可用的账号；失败或冷却时继续向后尝试。",
+        round_robin: "在可用账号之间依次轮换，让请求数量更均匀。",
+        least_used: "优先选择本次服务启动以来已分配请求数最少的可用账号；服务重启后计数重新开始。",
+        highest_balance: "只有全部可用账号的余额都新鲜、可读取且单位可比较时才按余额选择；任一余额未知、过期、获取失败或单位不同，都会整体回退到最少使用优先。"
+      };
+
+      var stateLabels = {
+        available: "可用",
+        ready: "可用",
+        active: "正在使用",
+        cooldown: "冷却中",
+        cooling_down: "冷却中",
+        incomplete: "配置不完整",
+        blocked: "已阻止",
+        pending_changes: "待保存",
+        exhausted: "额度耗尽",
+        quota_exhausted: "额度耗尽",
+        unavailable: "暂不可用",
+        invalid: "Key 无效",
+        disabled: "已停用",
+        unverified: "待验证",
+        unknown: "状态未知"
+      };
+
+      var balanceStateLabels = {
+        unknown: "未知（不按 0 计算）",
+        unsupported: "上游不提供余额",
+        unavailable: "余额获取失败",
+        error: "余额获取失败",
+        not_checked: "未知（尚未刷新）",
+        pending: "正在刷新"
+      };
+
+      var fallbackReasonLabels = {
+        balance_stale: "部分可用账号的余额数据已过期",
+        balance_unavailable: "部分可用账号的余额未知或不可用",
+        balance_unit_unknown: "部分余额缺少可比较的单位",
+        balance_unit_mismatch: "账号余额单位不同，无法直接比较"
+      };
+
+      var csrfToken = "";
+      var config = createEmptyConfig();
+      var status = createEmptyStatus();
+      var codexSnippet = "";
+      var dirty = false;
+      var expandedAccounts = new Set();
+      var pollTimer = 0;
+      var balancePollTimer = 0;
+      var balanceRefreshInFlight = false;
+      var statusRefreshPromise = null;
+      var balancePollInterval = 60000;
+      var pageReady = false;
+      var pageBusy = true;
+
+      var elements = {
+        main: document.getElementById("main"),
+        serviceState: document.getElementById("serviceState"),
+        globalNotice: document.getElementById("globalNotice"),
+        persistentHttpWarning: document.getElementById("persistentHttpWarning"),
+        liveRegion: document.getElementById("liveRegion"),
+        summaryStrategy: document.getElementById("summaryStrategy"),
+        summaryAccounts: document.getElementById("summaryAccounts"),
+        summaryLastAccount: document.getElementById("summaryLastAccount"),
+        dirtyState: document.getElementById("dirtyState"),
+        savedState: document.getElementById("savedState"),
+        strategy: document.getElementById("strategy"),
+        strategyHelp: document.getElementById("strategyHelp"),
+        testModel: document.getElementById("testModel"),
+        effectiveStrategyNotice: document.getElementById("effectiveStrategyNotice"),
+        fallbackWarning: document.getElementById("fallbackWarning"),
+        strategyContinuityWarning: document.getElementById("strategyContinuityWarning"),
+        accountList: document.getElementById("accountList"),
+        emptyState: document.getElementById("emptyState"),
+        accountTemplate: document.getElementById("accountTemplate"),
+        addAccountButton: document.getElementById("addAccountButton"),
+        emptyAddButton: document.getElementById("emptyAddButton"),
+        refreshBalancesButton: document.getElementById("refreshBalancesButton"),
+        balanceRefreshResult: document.getElementById("balanceRefreshResult"),
+        reloadButton: document.getElementById("reloadButton"),
+        saveButton: document.getElementById("saveButton"),
+        copyCodexButton: document.getElementById("copyCodexButton"),
+        codexSnippet: document.getElementById("codexSnippet"),
+        httpRiskDialog: document.getElementById("httpRiskDialog"),
+        httpRiskList: document.getElementById("httpRiskList")
+      };
+
+      function createEmptyConfig() {
+        return {
+          strategy: "priority",
+          testModel: "",
+          allowInsecureHttp: false,
+          accounts: []
+        };
+      }
+
+      function createEmptyStatus() {
+        return {
+          strategy: "priority",
+          effectiveStrategy: "priority",
+          fallbackReason: "",
+          lastRoutedAccountId: "",
+          lastRoutedAccountName: "",
+          availableAccounts: 0,
+          totalAccounts: 0,
+          accounts: []
+        };
+      }
+
+      function normalizeConfig(value) {
+        var source = value && typeof value === "object" ? value : {};
+        var accounts = Array.isArray(source.accounts) ? source.accounts : [];
+        return {
+          strategy: strategyLabels[source.strategy] ? source.strategy : "priority",
+          testModel: typeof source.testModel === "string" ? source.testModel : "",
+          allowInsecureHttp: source.allowInsecureHttp === true,
+          accounts: accounts.map(function (account) {
+            var id = account.id == null ? "" : String(account.id);
+            return {
+              id: id,
+              _uiId: id || newAccountId(),
+              name: typeof account.name === "string" ? account.name : "",
+              baseUrl: typeof account.baseUrl === "string" ? account.baseUrl : "",
+              enabled: account.enabled !== false,
+              _savedBaseUrl: typeof account.baseUrl === "string" ? account.baseUrl.trim() : "",
+              _savedEnabled: account.enabled !== false,
+              keyConfigured: account.keyConfigured === true,
+              apiKey: "",
+              clearApiKey: false
+            };
+          })
+        };
+      }
+
+      function normalizeStatus(value) {
+        var source = value && typeof value === "object" ? value : {};
+        return {
+          strategy: strategyLabels[source.strategy] ? source.strategy : "priority",
+          effectiveStrategy: strategyLabels[source.effectiveStrategy] ? source.effectiveStrategy : (strategyLabels[source.strategy] ? source.strategy : "priority"),
+          fallbackReason: typeof source.fallbackReason === "string" ? source.fallbackReason : "",
+          lastRoutedAccountId: source.lastRoutedAccountId == null ? "" : String(source.lastRoutedAccountId),
+          lastRoutedAccountName: typeof source.lastRoutedAccountName === "string" ? source.lastRoutedAccountName : "",
+          availableAccounts: numberOrZero(source.availableAccounts),
+          totalAccounts: numberOrZero(source.totalAccounts),
+          accounts: Array.isArray(source.accounts) ? source.accounts : []
+        };
+      }
+
+      function numberOrZero(value) {
+        return typeof value === "number" && Number.isFinite(value) ? value : 0;
+      }
+
+      function newAccountId() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          return window.crypto.randomUUID();
+        }
+        if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+          var bytes = new Uint32Array(4);
+          window.crypto.getRandomValues(bytes);
+          return "account-" + Array.prototype.map.call(bytes, function (item) {
+            return item.toString(16).padStart(8, "0");
+          }).join("");
+        }
+        return "account-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+      }
+
+      function announce(message) {
+        elements.liveRegion.textContent = "";
+        window.setTimeout(function () {
+          elements.liveRegion.textContent = message;
+        }, 20);
+      }
+
+      function setTextIfChanged(element, text) {
+        var next = text == null ? "" : String(text);
+        if (element.textContent !== next) {
+          element.textContent = next;
+        }
+      }
+
+      function setHiddenIfChanged(element, hidden) {
+        if (element.hidden !== hidden) {
+          element.hidden = hidden;
+        }
+      }
+
+      function showGlobalError(message) {
+        elements.globalNotice.textContent = message;
+        elements.globalNotice.hidden = false;
+        elements.globalNotice.focus();
+      }
+
+      function clearGlobalError() {
+        elements.globalNotice.hidden = true;
+        elements.globalNotice.textContent = "";
+      }
+
+      function setServiceState(kind, text) {
+        if (elements.serviceState.dataset.state !== kind) {
+          elements.serviceState.dataset.state = kind;
+        }
+        setTextIfChanged(elements.serviceState, text);
+      }
+
+      function restorePageControl(control) {
+        if (!control || !control.hasAttribute("data-page-lock-disabled")) {
+          return;
+        }
+        control.disabled = control.dataset.pageLockDisabled === "true";
+        control.removeAttribute("data-page-lock-disabled");
+      }
+
+      function updatePageInteractivity() {
+        var locked = pageBusy || !pageReady;
+        elements.main.setAttribute("aria-busy", String(pageBusy));
+        if (pageBusy) {
+          elements.main.setAttribute("inert", "");
+        } else {
+          elements.main.removeAttribute("inert");
+        }
+
+        elements.main.querySelectorAll("button, input, select").forEach(function (control) {
+          if (locked) {
+            if (!control.hasAttribute("data-page-lock-disabled")) {
+              control.dataset.pageLockDisabled = String(control.disabled);
+            }
+            control.disabled = true;
+          } else {
+            restorePageControl(control);
+          }
+        });
+
+        if (!pageBusy && !pageReady) {
+          restorePageControl(elements.reloadButton);
+          elements.reloadButton.disabled = false;
+        }
+      }
+
+      function setPageBusy(busy) {
+        pageBusy = busy;
+        updatePageInteractivity();
+      }
+
+      function updatePersistentHTTPWarning() {
+        var insecure = config.accounts.filter(function (account) {
+          return account.baseUrl.trim().toLowerCase().indexOf("http://") === 0;
+        });
+        if (insecure.length === 0) {
+          setHiddenIfChanged(elements.persistentHttpWarning, true);
+          setTextIfChanged(elements.persistentHttpWarning, "");
+          return;
+        }
+        var names = insecure.slice(0, 3).map(function (account) {
+          return account.name.trim() || "未命名账号";
+        });
+        var subject = names.join("、") + (insecure.length > names.length ? " 等 " + insecure.length + " 个账号" : "");
+        setTextIfChanged(elements.persistentHttpWarning,
+          "安全风险：当前已保存配置中的 " + subject + " 使用明文 HTTP。路由请求时，API Key、提示词、代码和响应可能被窃听；建议尽快改用 HTTPS。"
+        );
+        setHiddenIfChanged(elements.persistentHttpWarning, false);
+      }
+
+      function markDirty() {
+        if (!dirty) {
+          dirty = true;
+          elements.dirtyState.hidden = false;
+          elements.savedState.hidden = true;
+          document.title = "• Codex Quota Router";
+        }
+      }
+
+      function markClean() {
+        dirty = false;
+        elements.dirtyState.hidden = true;
+        elements.savedState.hidden = false;
+        document.title = "Codex Quota Router";
+      }
+
+      function getStatusAccount(id) {
+        if (!id) {
+          return null;
+        }
+        var target = String(id);
+        for (var index = 0; index < status.accounts.length; index += 1) {
+          if (String(status.accounts[index].id) === target) {
+            return status.accounts[index];
+          }
+        }
+        return null;
+      }
+
+      function accountUIID(account) {
+        return String(account._uiId || account.id);
+      }
+
+      function getAccount(id) {
+        var target = String(id);
+        for (var index = 0; index < config.accounts.length; index += 1) {
+          if (accountUIID(config.accounts[index]) === target) {
+            return config.accounts[index];
+          }
+        }
+        return null;
+      }
+
+      function getAccountIndex(id) {
+        var target = String(id);
+        for (var index = 0; index < config.accounts.length; index += 1) {
+          if (accountUIID(config.accounts[index]) === target) {
+            return index;
+          }
+        }
+        return -1;
+      }
+
+      function findCard(id) {
+        var cards = elements.accountList.querySelectorAll(".account-card");
+        for (var index = 0; index < cards.length; index += 1) {
+          if (cards[index].dataset.accountId === String(id)) {
+            return cards[index];
+          }
+        }
+        return null;
+      }
+
+      function fieldDomId(field, index) {
+        return "account-" + (index + 1) + "-" + field;
+      }
+
+      function setFieldIdentity(card, index, field) {
+        var input = card.querySelector('[data-field="' + field + '"]');
+        var label = card.querySelector('[data-label="' + field + '"]');
+        var helper = card.querySelector('[data-helper="' + field + '"]');
+        var error = card.querySelector('[data-error="' + field + '"]');
+        var id = fieldDomId(field, index);
+        if (input) {
+          input.id = id;
+        }
+        if (label) {
+          label.htmlFor = id;
+        }
+        var describedBy = [];
+        if (helper) {
+          helper.id = id + "-help";
+          describedBy.push(helper.id);
+        }
+        if (error) {
+          error.id = id + "-error";
+          describedBy.push(error.id);
+        }
+        if (input && describedBy.length) {
+          input.setAttribute("aria-describedby", describedBy.join(" "));
+        }
+      }
+
+      function updateAccountControlLabels(card, account, index, expanded) {
+        var name = account.name.trim() || "未命名账号";
+        var enabled = card.querySelector('[data-field="enabled"]');
+        var clearKey = card.querySelector('[data-field="clearApiKey"]');
+        var labels = {
+          edit: (expanded ? "收起" : "编辑") + "账号 " + name,
+          "move-up": "上移账号 " + name + "，当前第 " + (index + 1) + " 位",
+          "move-down": "下移账号 " + name + "，当前第 " + (index + 1) + " 位",
+          test: "测试账号 " + name + " 当前填写的内容",
+          reset: "恢复账号 " + name + " 的运行状态",
+          delete: "删除账号 " + name
+        };
+        enabled.setAttribute("aria-label", "启用账号 " + name);
+        clearKey.setAttribute("aria-label", "清除账号 " + name + " 已保存的 API Key");
+        Object.keys(labels).forEach(function (action) {
+          var button = card.querySelector('[data-action="' + action + '"]');
+          if (button) {
+            button.setAttribute("aria-label", labels[action]);
+          }
+        });
+      }
+
+      function renderAccounts() {
+        elements.accountList.replaceChildren();
+        elements.emptyState.hidden = config.accounts.length !== 0;
+
+        config.accounts.forEach(function (account, index) {
+          var card = elements.accountTemplate.content.firstElementChild.cloneNode(true);
+          var editor = card.querySelector('[data-slot="editor"]');
+          var editButton = card.querySelector('[data-action="edit"]');
+          var enabledInput = card.querySelector('[data-field="enabled"]');
+          var nameInput = card.querySelector('[data-field="name"]');
+          var urlInput = card.querySelector('[data-field="baseUrl"]');
+          var keyInput = card.querySelector('[data-field="apiKey"]');
+          var clearInput = card.querySelector('[data-field="clearApiKey"]');
+          var editorId = "account-" + (index + 1) + "-editor";
+          var uiID = accountUIID(account);
+          var expanded = expandedAccounts.has(uiID);
+
+          card.dataset.accountId = uiID;
+          card.querySelector('[data-slot="priority"]').textContent = String(index + 1);
+          card.querySelector('[data-slot="priority"]').setAttribute("aria-label", "优先级 " + (index + 1));
+          card.querySelector('[data-slot="name"]').textContent = account.name.trim() || "未命名账号";
+          card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
+          card.querySelector('[data-slot="key-state"]').textContent = account.keyConfigured ? "服务器已保存 Key" : "尚未保存 Key";
+
+          enabledInput.checked = account.enabled;
+          enabledInput.dataset.accountId = uiID;
+          nameInput.value = account.name;
+          nameInput.dataset.accountId = uiID;
+          urlInput.value = account.baseUrl;
+          urlInput.dataset.accountId = uiID;
+          keyInput.value = account.apiKey;
+          keyInput.dataset.accountId = uiID;
+          clearInput.checked = account.clearApiKey;
+          clearInput.dataset.accountId = uiID;
+          clearInput.disabled = !account.keyConfigured;
+          keyInput.disabled = account.clearApiKey;
+          keyInput.placeholder = account.keyConfigured ? "已保存；留空则保留" : "输入此账号的 API Key";
+          card.querySelector('[data-slot="key-help"]').textContent = account.keyConfigured
+            ? "Key 不会回显。留空将保留原值，输入新值将替换原值。"
+            : "此账号尚未配置 Key；保存新账号前必须填写。";
+
+          setFieldIdentity(card, index, "name");
+          setFieldIdentity(card, index, "baseUrl");
+          setFieldIdentity(card, index, "apiKey");
+
+          editor.id = editorId;
+          editor.hidden = !expanded;
+          editButton.setAttribute("aria-controls", editorId);
+          editButton.setAttribute("aria-expanded", String(expanded));
+          editButton.textContent = expanded ? "收起编辑" : "编辑账号";
+
+          card.querySelectorAll("button[data-action]").forEach(function (button) {
+            button.dataset.accountId = uiID;
+          });
+          card.querySelector('[data-action="move-up"]').disabled = index === 0;
+          card.querySelector('[data-action="move-down"]').disabled = index === config.accounts.length - 1;
+          card.querySelector('[data-action="reset"]').disabled = getStatusAccount(account.id) === null;
+          updateAccountControlLabels(card, account, index, expanded);
+
+          elements.accountList.appendChild(card);
+          updateAccountStatus(card, account);
+        });
+        updatePageInteractivity();
+      }
+
+      function accountRuntimeConfigChanged(account) {
+        return !account.id || (
+          account.baseUrl.trim() !== account._savedBaseUrl ||
+          account.enabled !== account._savedEnabled ||
+          account.apiKey.trim() !== "" ||
+          account.clearApiKey
+        );
+      }
+
+      function updateAccountStatus(card, account) {
+        var accountStatus = getStatusAccount(account.id);
+        var stateElement = card.querySelector('[data-slot="state"]');
+        var state = account.enabled ? "unknown" : "disabled";
+
+        if (accountRuntimeConfigChanged(account)) {
+          var isNewAccount = !account.id;
+          stateElement.textContent = stateLabels.pending_changes;
+          stateElement.className = "tag warning";
+          stateElement.title = isNewAccount
+            ? "新账号尚未保存"
+            : "URL、Key 或启用状态尚未保存；运行状态仍对应服务器中的旧配置";
+          card.querySelector('[data-slot="balance"]').textContent = isNewAccount ? "保存后获取" : "待保存后重新获取";
+          card.querySelector('[data-slot="requests"]').textContent = "—";
+          card.querySelector('[data-slot="last-used"]').textContent = "—";
+          card.querySelector('[data-slot="health"]').textContent = isNewAccount ? "尚未保存" : "当前运行状态对应旧配置";
+          var pendingResetButton = card.querySelector('[data-action="reset"]');
+          if (pendingResetButton) {
+            pendingResetButton.disabled = true;
+            pendingResetButton.title = "请先保存当前账号配置";
+          }
+          return;
+        }
+
+        if (account.enabled && accountStatus && typeof accountStatus.state === "string") {
+          state = accountStatus.state;
+        }
+
+        stateElement.textContent = stateLabels[state] || state || "状态未知";
+        stateElement.className = "tag";
+        if (state === "available" || state === "ready" || state === "active") {
+          stateElement.classList.add("success");
+        } else if (state === "cooldown" || state === "cooling_down" || state === "unverified" || state === "unknown" || state === "incomplete") {
+          stateElement.classList.add("warning");
+        } else if (state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
+          stateElement.classList.add("danger");
+        }
+        stateElement.title = "服务端状态：" + (state || "unknown");
+
+        card.querySelector('[data-slot="balance"]').textContent = formatBalance(accountStatus && accountStatus.balance);
+        card.querySelector('[data-slot="requests"]').textContent = formatInteger(accountStatus && accountStatus.assignedRequests);
+        card.querySelector('[data-slot="last-used"]').textContent = formatDateTime(accountStatus && accountStatus.lastUsedAt, "尚未使用");
+        card.querySelector('[data-slot="health"]').textContent = formatHealth(accountStatus);
+
+        var resetButton = card.querySelector('[data-action="reset"]');
+        if (resetButton) {
+          resetButton.disabled = !accountStatus;
+          resetButton.title = accountStatus ? "清除该账号的耗尽、不可用或冷却状态" : "此账号尚未保存";
+        }
+      }
+
+      function formatBalance(balance) {
+        if (!balance || typeof balance !== "object") {
+          return "未知（尚无数据）";
+        }
+        var state = typeof balance.state === "string"
+          ? balance.state
+          : (typeof balance.status === "string" ? balance.status : "unknown");
+        if (state === "unknown" || state === "not_checked" || state === "unsupported" || state === "unavailable" || state === "error" || state === "pending") {
+          return balanceStateLabels[state] || "未知（不按 0 计算）";
+        }
+        if (balance.unlimited === true) {
+          return "无限" + (balance.displayLabel ? " · " + String(balance.displayLabel) : "");
+        }
+        var amount = balance.remaining;
+        if (amount === null || typeof amount === "undefined") {
+          amount = balance.amount;
+        }
+        if (amount === null || typeof amount === "undefined" || amount === "") {
+          return "未知（不按 0 计算）";
+        }
+        var remaining = amount;
+        if (typeof remaining === "number" && Number.isFinite(remaining)) {
+          remaining = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 }).format(remaining);
+        } else {
+          remaining = String(remaining);
+        }
+        var unit = balance.displayLabel || (balance.unit === "display_unit" ? "" : balance.unit);
+        var result = unit ? remaining + " " + String(unit) : remaining;
+        if (balance.fresh === false && balance.updatedAt) {
+          result += "（已过期）";
+        }
+        return result;
+      }
+
+      function formatInteger(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          return "0";
+        }
+        return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
+      }
+
+      function formatDateTime(value, fallback) {
+        if (!value) {
+          return fallback;
+        }
+        var date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return String(value);
+        }
+        return new Intl.DateTimeFormat("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(date);
+      }
+
+      function formatHealth(accountStatus) {
+        if (!accountStatus) {
+          return "尚未保存";
+        }
+        if (accountStatus.cooldownUntil) {
+          return "冷却至 " + formatDateTime(accountStatus.cooldownUntil, String(accountStatus.cooldownUntil));
+        }
+        if (accountStatus.blockedReason) {
+          var blockedLabels = {
+            quota: "额度耗尽",
+            unauthorized: "Key 无效"
+          };
+          return "已阻止：" + (blockedLabels[accountStatus.blockedReason] || String(accountStatus.blockedReason));
+        }
+        return accountStatus.verified ? "已验证" : "待验证";
+      }
+
+      function updateStatusUI() {
+        var effective = status.effectiveStrategy || status.strategy || "priority";
+        var configured = status.strategy || "priority";
+        elements.summaryStrategy.textContent = strategyLabels[effective] || effective;
+        elements.summaryAccounts.textContent = status.availableAccounts + " / " + status.totalAccounts;
+        elements.summaryLastAccount.textContent = status.lastRoutedAccountName || status.lastRoutedAccountId || "尚无请求";
+        elements.summaryLastAccount.title = status.lastRoutedAccountId ? "账号 ID：" + status.lastRoutedAccountId : "";
+
+        var selected = config.strategy;
+        var savedStrategyDiffers = selected !== configured;
+        var effectiveText = "服务当前实际执行：" + (strategyLabels[effective] || effective) + "。";
+        if (savedStrategyDiffers) {
+          effectiveText += " 页面中选择的“" + (strategyLabels[selected] || selected) + "”尚未保存。";
+        }
+        if (configured === "highest_balance" || selected === "highest_balance") {
+          effectiveText += " 只有全部可用账号余额均可比较时才执行余额策略；否则整体回退到最少使用优先，未知余额不会按 0 处理。";
+        }
+        setTextIfChanged(elements.effectiveStrategyNotice, effectiveText);
+
+        var hasFallback = configured === "highest_balance" && (effective !== "highest_balance" || status.fallbackReason);
+        setHiddenIfChanged(elements.fallbackWarning, !hasFallback);
+        if (hasFallback) {
+          var reasonCode = status.fallbackReason || "";
+          var reason = fallbackReasonLabels[reasonCode] || reasonCode || "当前没有足够的已知余额数据";
+          setTextIfChanged(elements.fallbackWarning, "最高余额策略当前无法直接决策，已实际回退为“" +
+            (strategyLabels[effective] || effective) + "”。原因：" + reason + "。未知余额没有被当作 0。");
+        }
+
+        config.accounts.forEach(function (account) {
+          var card = findCard(accountUIID(account));
+          if (card) {
+            updateAccountStatus(card, account);
+          }
+        });
+      }
+
+      function updateStrategyDescription() {
+        elements.strategyHelp.textContent = strategyDescriptions[config.strategy] || "";
+        updateStatusUI();
+      }
+
+      function clearFieldErrors(card) {
+        card.querySelectorAll("[aria-invalid]").forEach(function (field) {
+          field.removeAttribute("aria-invalid");
+        });
+        card.querySelectorAll(".field-error").forEach(function (error) {
+          error.hidden = true;
+          error.textContent = "";
+        });
+      }
+
+      function setFieldError(card, fieldName, message) {
+        var field = card.querySelector('[data-field="' + fieldName + '"]');
+        var error = card.querySelector('[data-error="' + fieldName + '"]');
+        if (field) {
+          field.setAttribute("aria-invalid", "true");
+        }
+        if (error) {
+          error.textContent = message;
+          error.hidden = false;
+        }
+      }
+
+      function validateURL(value) {
+        var parsed;
+        try {
+          parsed = new URL(value);
+        } catch (error) {
+          return "请输入完整的 http:// 或 https:// 地址";
+        }
+        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.host) {
+          return "地址必须使用 http:// 或 https://";
+        }
+        if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+          return "地址不能包含用户信息、查询参数或片段";
+        }
+        return "";
+      }
+
+      function validateAccount(account, options) {
+        var card = findCard(accountUIID(account));
+        var firstInvalid = null;
+        var requireKey = options && options.requireKey === true;
+        if (card) {
+          clearFieldErrors(card);
+        }
+
+        if (!account.name.trim()) {
+          if (card) {
+            setFieldError(card, "name", "请填写账号名称");
+          }
+          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="name"]'));
+        }
+
+        var urlError = validateURL(account.baseUrl.trim());
+        if (urlError) {
+          if (card) {
+            setFieldError(card, "baseUrl", urlError);
+          }
+          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="baseUrl"]'));
+        }
+
+        var hasUsableKey = account.apiKey.trim() !== "" || (account.keyConfigured && !account.clearApiKey);
+        if ((requireKey || account.enabled || !account.id) && !hasUsableKey) {
+          if (card) {
+            setFieldError(card, "apiKey", account.id
+              ? "已启用账号必须保留已保存的 Key，或填写一个新 Key"
+              : "新账号必须填写 API Key");
+          }
+          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="apiKey"]'));
+        }
+
+        return firstInvalid;
+      }
+
+      function validateAllAccounts() {
+        var firstInvalid = null;
+        config.accounts.forEach(function (account) {
+          var invalid = validateAccount(account);
+          firstInvalid = firstInvalid || invalid;
+        });
+
+        if (firstInvalid) {
+          var card = firstInvalid.closest(".account-card");
+          if (card) {
+            var id = card.dataset.accountId;
+            expandedAccounts.add(id);
+            var editor = card.querySelector('[data-slot="editor"]');
+            var editButton = card.querySelector('[data-action="edit"]');
+            editor.hidden = false;
+            editButton.setAttribute("aria-expanded", "true");
+            editButton.textContent = "收起编辑";
+          }
+          showGlobalError("部分账号配置不完整，请修正标出的字段。");
+          firstInvalid.focus();
+          return null;
+        }
+        return config.accounts;
+      }
+
+      function httpURLs(accounts) {
+        return accounts.map(function (account) {
+          return account.baseUrl.trim();
+        }).filter(function (value, index, list) {
+          return value.toLowerCase().indexOf("http://") === 0 && list.indexOf(value) === index;
+        });
+      }
+
+      function confirmHTTPRisk(urls) {
+        if (urls.length === 0) {
+          return Promise.resolve(true);
+        }
+        elements.httpRiskList.replaceChildren();
+        urls.forEach(function (url) {
+          var item = document.createElement("li");
+          item.textContent = url;
+          elements.httpRiskList.appendChild(item);
+        });
+
+        return new Promise(function (resolve) {
+          function onClose() {
+            resolve(elements.httpRiskDialog.returnValue === "confirm");
+          }
+          elements.httpRiskDialog.addEventListener("close", onClose, { once: true });
+          if (typeof elements.httpRiskDialog.showModal === "function") {
+            elements.httpRiskDialog.returnValue = "";
+            elements.httpRiskDialog.showModal();
+          } else {
+            resolve(window.confirm("检测到明文 HTTP 地址。API Key、提示词、代码和响应可能被窃听。是否仍要继续？"));
+          }
+        });
+      }
+
+      function saveAccountPayload(account) {
+        return {
+          id: account.id,
+          name: account.name.trim(),
+          baseUrl: account.baseUrl.trim(),
+          enabled: account.enabled,
+          apiKey: account.apiKey,
+          clearApiKey: account.clearApiKey
+        };
+      }
+
+      function candidatePayload(account) {
+        return {
+          id: account.id,
+          name: account.name.trim(),
+          baseUrl: account.baseUrl.trim(),
+          enabled: account.enabled,
+          apiKey: account.apiKey,
+          clearApiKey: account.clearApiKey
+        };
+      }
+
+      async function api(path, options) {
+        var requestOptions = Object.assign({ cache: "no-store" }, options || {});
+        requestOptions.headers = Object.assign({ "Accept": "application/json" }, requestOptions.headers || {});
+        if (requestOptions.body !== undefined) {
+          requestOptions.headers["Content-Type"] = "application/json";
+        }
+        if (requestOptions.method && requestOptions.method !== "GET") {
+          requestOptions.headers["X-CSRF-Token"] = csrfToken;
+        }
+
+        var response = await fetch(path, requestOptions);
+        var text = await response.text();
+        var data = {};
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (error) {
+            data = { message: text };
+          }
+        }
+        if (!response.ok) {
+          var message = data.error || data.message || ("请求失败，HTTP " + response.status);
+          var apiError = new Error(message);
+          apiError.status = response.status;
+          apiError.data = data;
+          throw apiError;
+        }
+        return data;
+      }
+
+      function setButtonBusy(button, busyText) {
+        var original = button.textContent;
+        var originallyDisabled = button.disabled;
+        button.disabled = true;
+        button.textContent = busyText;
+        button.setAttribute("aria-busy", "true");
+        return function () {
+          button.textContent = original;
+          button.removeAttribute("aria-busy");
+          if (pageBusy || !pageReady) {
+            if (button.hasAttribute("data-page-lock-disabled")) {
+              button.dataset.pageLockDisabled = String(originallyDisabled);
+            }
+            button.disabled = true;
+          } else {
+            button.disabled = originallyDisabled;
+          }
+        };
+      }
+
+      async function loadBootstrap(options) {
+        var opts = options || {};
+        var wasReady = pageReady;
+        var failure = "";
+        clearGlobalError();
+        setPageBusy(true);
+        setServiceState("loading", "正在连接");
+        try {
+          var data = await api("/admin/bootstrap");
+          csrfToken = typeof data.csrfToken === "string" ? data.csrfToken : "";
+          config = normalizeConfig(data.config);
+          status = normalizeStatus(data.status);
+          pageReady = true;
+          codexSnippet = typeof data.codexSnippet === "string"
+            ? data.codexSnippet
+            : (data.codexSnippet && data.codexSnippet.snippet) || "";
+          expandedAccounts.clear();
+          elements.strategy.value = config.strategy;
+          elements.testModel.value = config.testModel;
+          elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
+          renderAccounts();
+          updateStrategyDescription();
+          updatePersistentHTTPWarning();
+          markClean();
+          setServiceState("online", "服务在线");
+        } catch (error) {
+          pageReady = wasReady;
+          setServiceState("offline", "连接失败");
+          failure = "无法加载管理配置：" + error.message;
+        } finally {
+          setPageBusy(false);
+        }
+        if (failure) {
+          showGlobalError(failure);
+        } else if (opts.announce) {
+          announce("已重新加载服务器配置");
+        }
+      }
+
+      function refreshStatus(silent) {
+        if (!pageReady || pageBusy || balanceRefreshInFlight) {
+          return Promise.resolve();
+        }
+        if (statusRefreshPromise) {
+          return statusRefreshPromise;
+        }
+        statusRefreshPromise = (async function () {
+          try {
+            var data = await api("/admin/status");
+            status = normalizeStatus(data.status || data);
+            updateStatusUI();
+            setServiceState("online", "服务在线");
+            if (!silent) {
+              announce("状态已刷新");
+            }
+          } catch (error) {
+            setServiceState("offline", "连接失败");
+            if (!silent) {
+              showGlobalError("无法刷新状态：" + error.message);
+            }
+          }
+        }()).finally(function () {
+          statusRefreshPromise = null;
+        });
+        return statusRefreshPromise;
+      }
+
+      async function saveAll() {
+        clearGlobalError();
+        var accounts = validateAllAccounts();
+        if (!accounts) {
+          return;
+        }
+        var insecureURLs = httpURLs(accounts);
+        var confirmed = await confirmHTTPRisk(insecureURLs);
+        if (!confirmed) {
+          announce("已取消保存");
+          return;
+        }
+
+        var restoreButton = setButtonBusy(elements.saveButton, "正在保存…");
+        var outcome = "";
+        var failure = "";
+        setPageBusy(true);
+        try {
+          var data = await api("/admin/config", {
+            method: "PUT",
+            body: JSON.stringify({
+              strategy: config.strategy,
+              testModel: config.testModel.trim(),
+              allowInsecureHttp: insecureURLs.length > 0,
+              accounts: accounts.map(saveAccountPayload)
+            })
+          });
+
+          config = normalizeConfig(data.config);
+          status = normalizeStatus(data.status);
+          if (typeof data.codexSnippet === "string") {
+            codexSnippet = data.codexSnippet;
+          }
+          elements.strategy.value = config.strategy;
+          elements.testModel.value = config.testModel;
+          elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
+          expandedAccounts.clear();
+          renderAccounts();
+          updateStrategyDescription();
+          updatePersistentHTTPWarning();
+          markClean();
+          setServiceState("online", "服务在线");
+          outcome = data.message || "全部配置已保存";
+        } catch (error) {
+          failure = "保存失败：" + error.message;
+        } finally {
+          setPageBusy(false);
+          restoreButton();
+        }
+        if (failure) {
+          showGlobalError(failure);
+          announce("保存失败");
+        } else {
+          announce(outcome);
+        }
+      }
+
+      async function testAccount(account, button) {
+        clearGlobalError();
+        elements.testModel.removeAttribute("aria-invalid");
+        if (!config.testModel.trim()) {
+          elements.testModel.setAttribute("aria-invalid", "true");
+          showGlobalError("测试前请填写连通性测试模型。");
+          elements.testModel.focus();
+          announce("请先填写连通性测试模型");
+          return;
+        }
+        var firstInvalid = validateAccount(account, { requireKey: true });
+        if (firstInvalid) {
+          firstInvalid.focus();
+          announce("请先修正 " + (account.name || "该账号") + " 的配置");
+          return;
+        }
+
+        var urls = httpURLs([account]);
+        var confirmed = await confirmHTTPRisk(urls);
+        if (!confirmed) {
+          announce("已取消测试");
+          return;
+        }
+
+        var card = findCard(accountUIID(account));
+        var resultElement = card && card.querySelector('[data-slot="test-result"]');
+        var restoreButton = setButtonBusy(button, "正在测试…");
+        if (resultElement) {
+          resultElement.className = "test-result";
+          resultElement.textContent = "正在使用当前未保存的填写内容测试…";
+        }
+
+        try {
+          var data = await api("/admin/test", {
+            method: "POST",
+            body: JSON.stringify({
+              accountId: account.id,
+              candidate: candidatePayload(account),
+              testModel: config.testModel.trim(),
+              allowInsecureHttp: urls.length > 0
+            })
+          });
+          var pieces = [];
+          pieces.push(data.ok === false ? "测试未通过" : "测试成功");
+          if (typeof data.statusCode === "number") {
+            pieces.push("HTTP " + data.statusCode);
+          }
+          if (typeof data.latencyMs === "number") {
+            pieces.push(data.latencyMs + " ms");
+          }
+          if (data.message) {
+            pieces.push(String(data.message));
+          }
+          if (data.balance) {
+            pieces.push("余额：" + formatBalance(data.balance));
+          }
+          var message = pieces.join(" · ");
+          if (resultElement) {
+            resultElement.className = data.ok === false ? "test-result danger" : "test-result success";
+            resultElement.textContent = message;
+          }
+          announce((account.name || "该账号") + "：" + message);
+          await refreshStatus(true);
+        } catch (error) {
+          var errorData = error.data && typeof error.data === "object" ? error.data : {};
+          var failureParts = ["测试失败"];
+          if (typeof errorData.statusCode === "number" && errorData.statusCode > 0) {
+            failureParts.push("HTTP " + errorData.statusCode);
+          }
+          if (typeof errorData.latencyMs === "number") {
+            failureParts.push(errorData.latencyMs + " ms");
+          }
+          failureParts.push(String(errorData.message || error.message));
+          var failure = failureParts.join(" · ");
+          if (resultElement) {
+            resultElement.className = "test-result danger";
+            resultElement.textContent = failure;
+          }
+          announce((account.name || "该账号") + " " + failure);
+        } finally {
+          restoreButton();
+        }
+      }
+
+      async function resetAccount(account, button) {
+        clearGlobalError();
+        var restoreButton = setButtonBusy(button, "正在恢复…");
+        try {
+          var data = await api("/admin/accounts/reset", {
+            method: "POST",
+            body: JSON.stringify({ id: account.id })
+          });
+          if (!data.status) {
+            throw new Error("服务未返回余额状态");
+          }
+          status = normalizeStatus(data.status);
+          updateStatusUI();
+          announce(data.message || (account.name || "账号") + " 的运行状态已恢复");
+        } catch (error) {
+          showGlobalError("恢复账号状态失败：" + error.message);
+          announce("恢复账号状态失败");
+        } finally {
+          restoreButton();
+        }
+      }
+
+      function numericCount(source, names) {
+        if (!source || typeof source !== "object") {
+          return null;
+        }
+        for (var index = 0; index < names.length; index += 1) {
+          var value = source[names[index]];
+          if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+            return Math.floor(value);
+          }
+        }
+        return null;
+      }
+
+      function balanceRefreshMessage(data) {
+        var payload = data && typeof data === "object" ? data : {};
+        if (typeof payload.summary === "string" && payload.summary.trim()) {
+          return payload.summary.trim();
+        }
+        if (typeof payload.balanceSummary === "string" && payload.balanceSummary.trim()) {
+          return payload.balanceSummary.trim();
+        }
+
+        var candidates = [payload.counts, payload.summary, payload.balanceCounts, payload.balanceSummary, payload];
+        var counts = null;
+        for (var index = 0; index < candidates.length; index += 1) {
+          var source = candidates[index];
+          var success = numericCount(source, ["success", "succeeded", "successful", "refreshed", "ok", "known"]);
+          var failed = numericCount(source, ["failed", "failure", "failures", "error", "errors"]);
+          var unsupported = numericCount(source, ["unsupported", "notSupported"]);
+          var skipped = numericCount(source, ["skipped", "unknown"]);
+          var total = numericCount(source, ["total", "checked", "processed"]);
+          if (success !== null || failed !== null || unsupported !== null || skipped !== null || total !== null) {
+            counts = { success: success, failed: failed, unsupported: unsupported, skipped: skipped, total: total };
+            break;
+          }
+        }
+
+        if (!counts && payload.status && Array.isArray(payload.status.accounts)) {
+          counts = { success: 0, failed: 0, unsupported: 0, skipped: 0, total: payload.status.accounts.length };
+          payload.status.accounts.forEach(function (account) {
+            var balance = account && account.balance && typeof account.balance === "object" ? account.balance : {};
+            var state = typeof balance.status === "string" ? balance.status : balance.state;
+            if (state === "ok" || state === "known") {
+              counts.success += 1;
+            } else if (state === "unsupported") {
+              counts.unsupported += 1;
+            } else if (state === "error" || state === "unavailable") {
+              counts.failed += 1;
+            } else {
+              counts.skipped += 1;
+            }
+          });
+        }
+
+        if (counts) {
+          var pieces = [];
+          if (counts.success !== null) pieces.push("成功 " + counts.success);
+          if (counts.failed !== null) pieces.push("失败 " + counts.failed);
+          if (counts.unsupported !== null) pieces.push("不支持 " + counts.unsupported);
+          if (counts.skipped !== null && counts.skipped > 0) pieces.push("未检查 " + counts.skipped);
+          if (pieces.length === 0 && counts.total !== null) pieces.push("已处理 " + counts.total);
+          if (pieces.length > 0) {
+            return "余额刷新完成：" + pieces.join("，") + "。";
+          }
+        }
+        if (typeof payload.message === "string" && payload.message.trim()) {
+          return payload.message.trim();
+        }
+        return "余额刷新请求已完成，请查看各账号的余额状态。";
+      }
+
+      function stopBalancePoll() {
+        if (balancePollTimer) {
+          window.clearTimeout(balancePollTimer);
+          balancePollTimer = 0;
+        }
+      }
+
+      function startStatusPoll() {
+        if (pollTimer) {
+          window.clearInterval(pollTimer);
+        }
+        pollTimer = window.setInterval(function () {
+          if (!document.hidden) {
+            refreshStatus(true);
+          }
+        }, 15000);
+      }
+
+      function scheduleBalancePoll(delay) {
+        stopBalancePoll();
+        if (!pageReady || document.hidden) {
+          return;
+        }
+        balancePollTimer = window.setTimeout(function () {
+          refreshBalances({ automatic: true });
+        }, typeof delay === "number" ? delay : balancePollInterval);
+      }
+
+      function balanceRefreshTime() {
+        return new Intl.DateTimeFormat("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        }).format(new Date());
+      }
+
+      async function refreshBalances(options) {
+        var automatic = options && options.automatic === true;
+        if (balanceRefreshInFlight) {
+          return;
+        }
+        if (!pageReady || pageBusy) {
+          scheduleBalancePoll();
+          return;
+        }
+        balanceRefreshInFlight = true;
+        if (!automatic) {
+          clearGlobalError();
+        }
+        var restoreButton = setButtonBusy(elements.refreshBalancesButton, automatic ? "自动刷新中…" : "正在刷新…");
+        if (!automatic) {
+          setTextIfChanged(elements.balanceRefreshResult, "正在刷新全部账号余额…");
+        }
+        try {
+          if (statusRefreshPromise) {
+            await statusRefreshPromise;
+          }
+          var data = await api("/admin/balances/refresh" + (automatic ? "?automatic=1" : ""), {
+            method: "POST",
+            body: JSON.stringify({})
+          });
+          if (data.status) {
+            status = normalizeStatus(data.status);
+            updateStatusUI();
+          } else {
+            await refreshStatus(true);
+          }
+          var message = balanceRefreshMessage(data);
+          if (automatic) {
+            setTextIfChanged(elements.balanceRefreshResult, "最近自动刷新 " + balanceRefreshTime() + "。" + message);
+          } else {
+            setTextIfChanged(elements.balanceRefreshResult, message);
+            announce(message);
+          }
+        } catch (error) {
+          var failure = "刷新余额失败：" + error.message;
+          if (automatic) {
+            setTextIfChanged(elements.balanceRefreshResult, "自动刷新失败，将在下一轮重试。" + error.message);
+          } else {
+            setTextIfChanged(elements.balanceRefreshResult, failure);
+            showGlobalError(failure);
+          }
+        } finally {
+          balanceRefreshInFlight = false;
+          restoreButton();
+          scheduleBalancePoll();
+        }
+      }
+
+      function addAccount() {
+        var account = {
+          id: "",
+          _uiId: newAccountId(),
+          name: "",
+          baseUrl: "",
+          enabled: true,
+          keyConfigured: false,
+          apiKey: "",
+          clearApiKey: false
+        };
+        config.accounts.push(account);
+        expandedAccounts.add(accountUIID(account));
+        markDirty();
+        renderAccounts();
+        updateStatusUI();
+        var card = findCard(accountUIID(account));
+        var nameInput = card && card.querySelector('[data-field="name"]');
+        if (nameInput) {
+          nameInput.focus();
+        }
+        announce("已添加新账号，请填写账号名称");
+      }
+
+      function deleteAccount(account) {
+        var name = account.name.trim() || "未命名账号";
+        if (!window.confirm("确认删除“" + name + "”吗？保存全部配置后才会从服务器删除。")) {
+          return;
+        }
+        var index = getAccountIndex(accountUIID(account));
+        if (index < 0) {
+          return;
+        }
+        var nextFocusAccount = config.accounts[index + 1] || config.accounts[index - 1] || null;
+        var nextFocusID = nextFocusAccount ? accountUIID(nextFocusAccount) : "";
+        config.accounts.splice(index, 1);
+        expandedAccounts.delete(accountUIID(account));
+        markDirty();
+        renderAccounts();
+        updateStatusUI();
+        var nextCard = nextFocusID ? findCard(nextFocusID) : null;
+        var nextButton = nextCard && nextCard.querySelector('[data-action="edit"]');
+        if (nextButton) {
+          nextButton.focus();
+        } else {
+          elements.addAccountButton.focus();
+        }
+        announce("已从待保存配置中删除 " + name + "，当前有未保存更改");
+      }
+
+      function moveAccount(account, direction, sourceAction) {
+        var index = getAccountIndex(accountUIID(account));
+        var target = index + direction;
+        if (index < 0 || target < 0 || target >= config.accounts.length) {
+          return;
+        }
+        config.accounts.splice(index, 1);
+        config.accounts.splice(target, 0, account);
+        markDirty();
+        renderAccounts();
+        updateStatusUI();
+        var card = findCard(accountUIID(account));
+        var focusTarget = card && card.querySelector('[data-action="' + sourceAction + '"]');
+        if (focusTarget && !focusTarget.disabled) {
+          focusTarget.focus();
+        } else if (card) {
+          card.querySelector('[data-action="edit"]').focus();
+        }
+        announce((account.name || "未命名账号") + " 已移动到第 " + (target + 1) + " 位，当前有未保存更改");
+      }
+
+      function toggleEditor(account, button) {
+        var card = findCard(accountUIID(account));
+        var editor = card && card.querySelector('[data-slot="editor"]');
+        if (!editor) {
+          return;
+        }
+        var willExpand = editor.hidden;
+        editor.hidden = !willExpand;
+        button.setAttribute("aria-expanded", String(willExpand));
+        button.textContent = willExpand ? "收起编辑" : "编辑账号";
+        updateAccountControlLabels(card, account, getAccountIndex(accountUIID(account)), willExpand);
+        if (willExpand) {
+          expandedAccounts.add(accountUIID(account));
+          var nameInput = editor.querySelector('[data-field="name"]');
+          if (nameInput) {
+            nameInput.focus();
+          }
+        } else {
+          expandedAccounts.delete(accountUIID(account));
+        }
+      }
+
+      function handleAccountInput(event) {
+        var field = event.target.dataset.field;
+        var id = event.target.dataset.accountId;
+        if (!field || !id) {
+          return;
+        }
+        var account = getAccount(id);
+        if (!account) {
+          return;
+        }
+        var card = findCard(id);
+        event.target.removeAttribute("aria-invalid");
+        var relatedError = card.querySelector('[data-error="' + field + '"]');
+        if (relatedError) {
+          relatedError.hidden = true;
+          relatedError.textContent = "";
+        }
+        if (field === "enabled" || field === "clearApiKey") {
+          var keyError = card.querySelector('[data-error="apiKey"]');
+          var keyField = card.querySelector('[data-field="apiKey"]');
+          keyField.removeAttribute("aria-invalid");
+          keyError.hidden = true;
+          keyError.textContent = "";
+        }
+
+        if (field === "enabled") {
+          account.enabled = event.target.checked;
+        } else if (field === "clearApiKey") {
+          account.clearApiKey = event.target.checked;
+          var keyInput = card.querySelector('[data-field="apiKey"]');
+          if (account.clearApiKey) {
+            account.apiKey = "";
+            keyInput.value = "";
+          }
+          keyInput.disabled = account.clearApiKey;
+        } else {
+          account[field] = event.target.value;
+          if (field === "apiKey" && event.target.value) {
+            account.clearApiKey = false;
+            var clearInput = card.querySelector('[data-field="clearApiKey"]');
+            clearInput.checked = false;
+          }
+        }
+
+        if (field === "name") {
+          card.querySelector('[data-slot="name"]').textContent = account.name.trim() || "未命名账号";
+          updateAccountControlLabels(card, account, getAccountIndex(id), !card.querySelector('[data-slot="editor"]').hidden);
+        }
+        if (field === "baseUrl") {
+          card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
+        }
+        updateAccountStatus(card, account);
+        markDirty();
+      }
+
+      function handleAccountAction(event) {
+        var button = event.target.closest("button[data-action]");
+        if (!button || !elements.accountList.contains(button)) {
+          return;
+        }
+        var account = getAccount(button.dataset.accountId);
+        if (!account) {
+          return;
+        }
+        var action = button.dataset.action;
+        if (action === "edit") {
+          toggleEditor(account, button);
+        } else if (action === "move-up") {
+          moveAccount(account, -1, "move-up");
+        } else if (action === "move-down") {
+          moveAccount(account, 1, "move-down");
+        } else if (action === "delete") {
+          deleteAccount(account);
+        } else if (action === "test") {
+          testAccount(account, button);
+        } else if (action === "reset") {
+          resetAccount(account, button);
+        }
+      }
+
+      async function copyCodexConfig() {
+        var restoreButton = setButtonBusy(elements.copyCodexButton, "正在复制…");
+        try {
+          if (!codexSnippet) {
+            throw new Error("当前没有可复制的配置");
+          }
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            await navigator.clipboard.writeText(codexSnippet);
+          } else {
+            var textarea = document.createElement("textarea");
+            textarea.value = codexSnippet;
+            textarea.setAttribute("readonly", "");
+            textarea.className = "visually-hidden";
+            document.body.appendChild(textarea);
+            textarea.select();
+            if (!document.execCommand("copy")) {
+              throw new Error("浏览器拒绝访问剪贴板");
+            }
+            textarea.remove();
+          }
+          announce("Codex 用户级配置已复制");
+        } catch (error) {
+          showGlobalError("复制失败：" + error.message);
+        } finally {
+          restoreButton();
+        }
+      }
+
+      elements.strategy.addEventListener("change", function () {
+        config.strategy = elements.strategy.value;
+        markDirty();
+        updateStrategyDescription();
+      });
+
+      elements.testModel.addEventListener("input", function () {
+        config.testModel = elements.testModel.value;
+        elements.testModel.removeAttribute("aria-invalid");
+        markDirty();
+      });
+
+      elements.accountList.addEventListener("input", handleAccountInput);
+      elements.accountList.addEventListener("change", handleAccountInput);
+      elements.accountList.addEventListener("click", handleAccountAction);
+      elements.addAccountButton.addEventListener("click", addAccount);
+      elements.emptyAddButton.addEventListener("click", addAccount);
+      elements.refreshBalancesButton.addEventListener("click", function () {
+        refreshBalances({ manual: true });
+      });
+      elements.saveButton.addEventListener("click", saveAll);
+      elements.copyCodexButton.addEventListener("click", copyCodexConfig);
+
+      elements.reloadButton.addEventListener("click", function () {
+        if (dirty && !window.confirm("放弃所有未保存更改并重新加载服务器配置吗？")) {
+          return;
+        }
+        loadBootstrap({ announce: true }).then(function () {
+          if (pageReady && !document.hidden) {
+            refreshBalances({ automatic: true });
+          }
+        });
+      });
+
+      window.addEventListener("beforeunload", function (event) {
+        if (!dirty) {
+          return;
+        }
+        event.preventDefault();
+        event.returnValue = "";
+      });
+
+      document.addEventListener("visibilitychange", function () {
+        if (document.hidden) {
+          stopBalancePoll();
+          setTextIfChanged(elements.balanceRefreshResult, "余额自动刷新已暂停；返回页面后继续。");
+        } else {
+          refreshBalances({ automatic: true });
+        }
+      });
+
+      updatePageInteractivity();
+      loadBootstrap().then(function () {
+        if (pageReady && !document.hidden) {
+          refreshBalances({ automatic: true });
+        }
+      });
+      startStatusPoll();
+
+      window.addEventListener("pagehide", function () {
+        stopBalancePoll();
+        if (pollTimer) {
+          window.clearInterval(pollTimer);
+          pollTimer = 0;
+        }
+      });
+
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted && pageReady && !document.hidden) {
+          startStatusPoll();
+          refreshBalances({ automatic: true });
+        }
+      });
+    }());
+  </script>
+</body>
+</html>

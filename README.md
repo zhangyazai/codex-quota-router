@@ -1,0 +1,164 @@
+# Codex Quota Router
+
+一个只监听本机的 Codex 多账号 Key 池路由器。Codex 始终连接 `127.0.0.1:4000`，账号、排序、分配策略、余额和运行状态通过 Web 页面管理。
+
+## 功能
+
+- 添加任意多个 OpenAI Responses 兼容账号，每个账号独立配置名称、Base URL、Key 和启用状态。
+- 用“上移 / 下移”调整账号顺序；数组顺序就是优先级顺序。
+- 支持按顺序、轮询、最少使用和余额最多四种策略。
+- 自动识别明确额度错误、已验证账号后续 401 和普通 429，并只影响对应账号。
+- 自动读取 New API Token 余额；管理页可见时约每 60 秒刷新已启用账号，也可手动立即刷新。
+- Windows 使用 DPAPI 加密配置；Linux 使用 `0700` 目录和 `0600` 配置文件。
+- 不记录请求、响应、Key 或应用运行日志。
+
+## 路由策略
+
+| 策略 | 行为 |
+| --- | --- |
+| 按优先级顺序 | 始终选择列表中第一个可用账号；它耗尽、不可用或冷却时再选择下一项。 |
+| 轮询使用 | 在可用账号间依次轮换，例如 A → B → C → A。 |
+| 最少使用优先 | 选择本次程序启动以来已分配请求数最少的账号；计数重启后重新开始。 |
+| 余额最多优先 | 无限额度账号优先，否则选择已知剩余额度最高的账号；余额相同则选择已分配请求较少的账号。 |
+
+“余额最多优先”不会把未知余额当作 0。只有全部当前可用账号的余额都新鲜、可读取且单位一致时才会直接比较；任一余额缺失、过期、探测失败或单位不同，实际策略都会明确回退为“最少使用优先”，管理页会显示原因。
+
+任何策略都可能在额度耗尽、认证失败或限流时故障切换账号；轮询、最少使用和余额最多策略还会主动切换。Responses API 的 [`previous_response_id`](https://developers.openai.com/api/docs/guides/conversation-state#passing-context-from-the-previous-response) 通常不能跨不共享响应存储的账号继续使用；遇到此问题时应新建 Codex 任务，并避免依赖跨账号延续的响应 ID。
+
+## 自动余额探测
+
+路由器按以下顺序读取每个账号的余额：
+
+1. 尝试 New API 的 `GET /api/usage/token/`，使用账号 Key 进行 Bearer 认证。
+2. 若该路由不存在或成功响应不符合余额格式，尝试 OpenAI 兼容的 `GET {base_url}/dashboard/billing/subscription` 和 `usage`。
+3. 两种方式都不支持时，将余额标记为“不支持”，不会伪造估算值。
+
+当前两个网关已只读验证：
+
+| 上游 | 探测方式 |
+| --- | --- |
+| `http://122.227.250.174:8000/v1` | 根路径 `/api/*` 被另一套 FastAPI 占用，因此使用 `/v1/dashboard/billing/subscription` 和 `/usage`，剩余额度按 `hard_limit_usd - total_usage / 100` 计算。 |
+| `https://newapi.shixian.me/v1` | 使用 `/api/usage/token/` 的 `total_available`，并通过 `/api/status` 的 `quota_per_unit` 转换为站点显示额度。 |
+
+余额策略使用 5 分钟新鲜度判断；管理页打开且可见时，会在加载后立即刷新，并约每 60 秒刷新一次已启用账号。多个页面同时打开时，后端会合并一分钟内的重复自动刷新；“刷新全部余额”仍会忽略缓存立即探测。单轮刷新最多等待约 8 秒，并限制为最多 8 个并发探测。所有余额请求只发往该账号配置的上游。
+
+这是轮询得到的近实时余额，不是上游主动推送；最终显示速度仍取决于上游账单接口自身的更新延迟。
+
+不同 New API 站点可能把显示额度配置为 USD、CNY 或 Token 数量。程序只比较成功归一化且单位文本一致的余额；USD、CNY、Token 或未知单位不会互相换算，而会安全回退到“最少使用优先”。
+
+## 失败与切换行为
+
+- HTTP 402 或响应内容明确表示额度、余额耗尽：持久阻止该账号，并尝试下一个账号。
+- 已经成功返回过 2xx 或测试成功的账号，后续返回 401：持久标记为不可用，并尝试下一个账号。
+- 从未验证成功的账号首次返回 401：只冷却 1 分钟，不永久判断为耗尽，并尝试下一个账号。
+- 普通 HTTP 429：只冷却该账号 1 分钟，并尝试下一个账号。
+- 充值、更换 Key 或确认恢复后，可点击该账号的“恢复账号状态”。
+- 路由器遇到网络连接错误和 HTTP 5xx 时不自动重放，因为请求可能已被上游接受，重试可能产生重复文本或工具调用。
+- 上游已经开始输出 SSE 流后，路由器绝不切换账号重放；管理页生成的 Codex provider 配置也将普通请求和流式重试次数设为 0。
+- 同一个请求对同一个账号最多尝试一次；请求开始时没有可用账号会返回 HTTP 503，若尝试后所有候选都因 401、额度错误或 429 被淘汰，则透传最后一个上游错误响应。
+- 单个代理请求体上限为 128 MiB，超出时返回 HTTP 413。
+
+## 安装与管理
+
+当前发布包面向 Windows 和 Linux 的 amd64 / x86-64 设备。
+
+Windows 发布包包含：
+
+```text
+codex-quota-router.exe
+router.bat
+README.md
+```
+
+双击 `router.bat` 等同于安装，也可在命令提示符中运行：
+
+```bat
+router.bat install
+router.bat start
+router.bat stop
+router.bat status
+router.bat uninstall
+router.bat purge
+```
+
+Linux 发布包包含：
+
+```text
+codex-quota-router
+router.sh
+README.md
+```
+
+```sh
+sh router.sh install
+sh router.sh start
+sh router.sh stop
+sh router.sh status
+sh router.sh uninstall
+sh router.sh purge
+```
+
+Linux 的安装、启动和健康检查需要系统已有 `curl` 或 `wget`，并需要可用的 `systemd --user` 会话。脚本不会安装系统软件包，也不会自动开启 linger。
+
+程序固定监听 `127.0.0.1:4000`，安装或直接启动前必须确保该端口未被其他程序占用。安装后的健康检查失败时，脚本会取消本次注册的自动启动；手动 `start` 失败时会停止刚启动的服务或计划任务，避免后台持续重启。
+
+命令含义：
+
+- `install`：复制二进制、注册当前用户登录后自启动、立即启动并打开管理页。
+- `start`：启动已安装服务并打开管理页。
+- `stop`：停止服务。
+- `status`：检查任务或服务是否正在运行，并验证 `http://127.0.0.1:4000/healthz` 的服务身份。
+- `uninstall`：删除自启动项和程序，保留账号配置。
+- `purge`：在卸载基础上删除默认配置目录。
+
+默认位置：
+
+| 平台 | 程序 | 配置 | 自启动 |
+| --- | --- | --- | --- |
+| Windows | `%LOCALAPPDATA%\CodexQuotaRouter\bin` | `%APPDATA%\codex-quota-router\config.dat` | 当前用户计划任务 |
+| Linux | `~/.local/lib/codex-quota-router` | `${XDG_CONFIG_HOME:-~/.config}/codex-quota-router/config.dat` | `systemd --user` |
+
+这里的“开机自启动”准确含义是当前用户登录后启动，不是登录前运行的系统服务。安装成功后访问 [http://127.0.0.1:4000/](http://127.0.0.1:4000/)。
+
+旧版双渠道配置会在首次启动时自动迁移为账号列表：通常保持“主渠道、备用渠道”的顺序；旧配置曾强制备用时，迁移后会把备用账号排在前面并停用主账号，保持原先“只用备用”的语义。
+
+## Codex 配置
+
+管理页会生成完整片段。它必须写入用户级 `~/.codex/config.toml`；Windows 对应 `%USERPROFILE%\.codex\config.toml`。[Codex 官方配置参考](https://developers.openai.com/codex/config-reference/)说明，项目内 `.codex/config.toml` 会忽略 `model_provider` 和 `model_providers`。
+
+```toml
+model_provider = "quota_router"
+
+[model_providers.quota_router]
+name = "quota-router"
+base_url = "http://127.0.0.1:4000/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+experimental_bearer_token = "<管理页生成的本地 Token>"
+requires_openai_auth = false
+```
+
+本地 Token 只保护 `/v1/*` 代理入口，不是任何上游 Key，但仍应按凭据保护。页面为方便一次复制使用 `experimental_bearer_token`；Codex 官方更推荐使用 `env_key` 从环境变量读取 provider Token。
+
+## 安全边界
+
+- 管理页和代理只监听 `127.0.0.1`，不要改为局域网或公网监听。
+- 管理接口只接受本机 Host，拒绝跨站 Origin；写操作需要进程启动时随机生成的 CSRF Token。
+- 配置与状态接口只返回 `keyConfigured`，不会向页面回显完整上游 Key。
+- 已保存账号的 Base URL 若改到不同来源（协议、主机或端口变化），必须重新填写 API Key 或明确清除旧 Key，旧 Key 不会被静默发送到新地址。
+- 本机其他进程仍可能访问本地端口；本工具不是已失陷主机上的隔离边界。
+- Windows DPAPI 配置只能由同一 Windows 用户解密，不能直接迁移给另一用户或 Linux。
+- Linux 配置为权限受限的 JSON 明文，备份时应按敏感凭据处理。
+- 当前主网关使用公网 HTTP，Key、代码、提示词和响应可能被明文窃听。管理页会强制二次确认，但更安全的方案仍是 HTTPS 上游或可信加密隧道。
+
+## 验证状态
+
+源码使用 Go 标准库，无第三方 Go 模块或前端 CDN。当前版本已通过：
+
+- `gofmt`
+- `go test ./...`
+- `go vet ./...`
+- `go test -race ./...`
+- 单元测试语句覆盖率 75.1%
+- Web JavaScript、HTML/ARIA、Windows PowerShell/CMD 和 Linux Shell 静态检查
