@@ -93,7 +93,7 @@ func TestLoadConfigMigratesV1AndHonorsForceBackup(t *testing.T) {
 
 func TestLoadConfigRejectsFutureVersionWithoutRewriting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.dat")
-	plain := []byte(`{"version":3,"accounts":[],"strategy":"priority","futureField":"keep-me"}`)
+	plain := []byte(`{"version":` + strconv.Itoa(configVersion+1) + `,"accounts":[],"strategy":"priority","futureField":"keep-me"}`)
 	protected, err := protectConfig(plain)
 	if err != nil {
 		t.Fatal(err)
@@ -240,12 +240,24 @@ func TestHighestBalanceFallsBackToLeastUsed(t *testing.T) {
 		t.Fatalf("fallback selected %q ok=%v, want b", account.ID, ok)
 	}
 
+	app.runtime["a"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 100, Unit: "USD", Scope: balanceScopeTokenOnly, UpdatedAt: now,
+	}
+	app.runtime["b"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 1, Unit: "USD", Scope: balanceScopeActual, UpdatedAt: now,
+	}
+	status = app.status()
+	if status.EffectiveStrategy != strategyLeastUsed || status.FallbackReason != "balance_account_unverified" {
+		t.Fatalf("token-only balance did not fall back: %#v", status)
+	}
+
 	app.runtime["a"].Balance = balanceSnapshot{Status: "ok", Amount: 100, Unit: "USD", UpdatedAt: now}
 	app.runtime["b"].Balance = balanceSnapshot{Status: "ok", Amount: 100, Unit: "CNY", UpdatedAt: now}
 	status = app.status()
 	if status.EffectiveStrategy != strategyLeastUsed || status.FallbackReason != "balance_unit_mismatch" {
 		t.Fatalf("unit mismatch did not fall back: %#v", status)
 	}
+
 }
 
 func TestQuotaBlocksOneAccountAndTriesNext(t *testing.T) {
@@ -635,6 +647,75 @@ func TestNewAccountRequiresKeyAndClearIsExplicit(t *testing.T) {
 	}
 }
 
+func TestAdminNewAPISecretLifecycleIsRedactedAndOriginBound(t *testing.T) {
+	account := testAccount("a", "https://old.invalid/v1", "model-key")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 42
+	account.NewAPISecret = "access-secret"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	enabled := true
+
+	publicRequest := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4000/admin/config", nil)
+	publicRequest.Host = listenAddress
+	publicResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicResponse, publicRequest)
+	if publicResponse.Code != http.StatusOK || strings.Contains(publicResponse.Body.String(), "access-secret") ||
+		strings.Contains(publicResponse.Body.String(), `"newApiSecret":`) ||
+		!strings.Contains(publicResponse.Body.String(), `"newApiSecretConfigured":true`) {
+		t.Fatalf("public config leaked or hid credential state: status=%d", publicResponse.Code)
+	}
+
+	preserve := saveRequest{Accounts: &[]accountInput{{
+		ID: "a", Name: "A renamed", BaseURL: "https://old.invalid/v1", Enabled: &enabled,
+		NewAPIAuthMode: newAPIAuthAccessToken, NewAPIUserID: 42,
+	}}}
+	response := adminJSON(app, http.MethodPut, "/admin/config", preserve, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || app.cfg.Accounts[0].NewAPISecret != "access-secret" ||
+		app.cfg.Accounts[0].Revision != 1 || strings.Contains(response.Body.String(), "access-secret") {
+		t.Fatalf("credential preservation failed: status=%d revision=%d",
+			response.Code, app.cfg.Accounts[0].Revision)
+	}
+
+	crossOrigin := saveRequest{Accounts: &[]accountInput{{
+		ID: "a", Name: "A renamed", BaseURL: "https://other.invalid/v1", APIKey: "model-key", Enabled: &enabled,
+		NewAPIAuthMode: newAPIAuthAccessToken, NewAPIUserID: 42,
+	}}}
+	response = adminJSON(app, http.MethodPut, "/admin/config", crossOrigin, "http://127.0.0.1:4000")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "New API 余额凭据") ||
+		app.cfg.Accounts[0].BaseURL != "https://old.invalid/v1" || app.cfg.Accounts[0].Revision != 1 {
+		t.Fatalf("cross-origin credential reuse was not rejected: status=%d revision=%d body=%s",
+			response.Code, app.cfg.Accounts[0].Revision, response.Body.String())
+	}
+
+	replace := saveRequest{Accounts: &[]accountInput{{
+		ID: "a", Name: "A renamed", BaseURL: "https://old.invalid/v1", Enabled: &enabled,
+		NewAPIAuthMode: newAPIAuthAccessToken, NewAPIUserID: 42, NewAPISecret: "replacement-secret",
+	}}}
+	response = adminJSON(app, http.MethodPut, "/admin/config", replace, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || app.cfg.Accounts[0].NewAPISecret != "replacement-secret" ||
+		app.cfg.Accounts[0].Revision != 2 || strings.Contains(response.Body.String(), "replacement-secret") {
+		t.Fatalf("credential replacement failed: status=%d revision=%d",
+			response.Code, app.cfg.Accounts[0].Revision)
+	}
+
+	clear := saveRequest{Accounts: &[]accountInput{{
+		ID: "a", Name: "A renamed", BaseURL: "https://old.invalid/v1", Enabled: &enabled,
+		NewAPIAuthMode: newAPIAuthAPIKey, ClearNewAPISecret: true,
+	}}}
+	response = adminJSON(app, http.MethodPut, "/admin/config", clear, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || app.cfg.Accounts[0].NewAPISecret != "" ||
+		app.cfg.Accounts[0].NewAPIAuthMode != newAPIAuthAPIKey || app.cfg.Accounts[0].Revision != 3 ||
+		!strings.Contains(response.Body.String(), `"newApiSecretConfigured":false`) {
+		t.Fatalf("credential clear failed: status=%d revision=%d mode=%q body=%s",
+			response.Code, app.cfg.Accounts[0].Revision, app.cfg.Accounts[0].NewAPIAuthMode, response.Body.String())
+	}
+	for _, secret := range []string{"access-secret", "replacement-secret"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("save response leaked a New API credential")
+		}
+	}
+}
+
 func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 	t.Run("New API", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -661,6 +742,44 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 			t.Fatalf("unexpected New API balance: %#v", balance)
 		}
 	})
+
+	for _, test := range []struct {
+		name          string
+		hardLimit     string
+		wantAmount    float64
+		wantUnlimited bool
+		wantScope     string
+	}{
+		{name: "unlimited token is capped by compatible user bill", hardLimit: "6", wantAmount: 5, wantScope: balanceScopeActual},
+		{name: "unlimited token sentinel stays unverified", hardLimit: "100000000", wantUnlimited: true, wantScope: balanceScopeTokenOnly},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/usage/token/":
+					_, _ = io.WriteString(w, `{"data":{"unlimited_quota":true}}`)
+				case "/api/status":
+					_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+				case "/v1/dashboard/billing/subscription":
+					_, _ = io.WriteString(w, `{"hard_limit_usd":`+test.hardLimit+`}`)
+				case "/v1/dashboard/billing/usage":
+					_, _ = io.WriteString(w, `{"total_usage":100}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			app := newTestApplication(t, strategyPriority, time.Now,
+				testAccount("a", server.URL+"/v1", "balance-key"),
+			)
+			balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+			if balance.Status != "ok" || balance.Amount != test.wantAmount || balance.Unlimited != test.wantUnlimited ||
+				balance.Scope != test.wantScope {
+				t.Fatalf("unexpected compatible unlimited balance: %#v", balance)
+			}
+		})
+	}
 
 	t.Run("dashboard fallback", func(t *testing.T) {
 		var pathsMu sync.Mutex
@@ -689,8 +808,33 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 			testAccount("a", server.URL+"/v1", "balance-key"),
 		)
 		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
-		if balance.Status != "ok" || balance.Amount != 95 || balance.Unit != "USD" {
+		if balance.Status != "ok" || balance.Amount != 95 || balance.Unit != "USD" ||
+			balance.Scope != balanceScopeActual {
 			t.Fatalf("unexpected dashboard balance: %#v paths=%v", balance, paths)
+		}
+	})
+
+	t.Run("dashboard fallback unlimited sentinel stays unverified", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/usage/token/", "/api/status":
+				http.NotFound(w, r)
+			case "/v1/dashboard/billing/subscription":
+				_, _ = io.WriteString(w, `{"hard_limit_usd":100000000}`)
+			case "/v1/dashboard/billing/usage":
+				_, _ = io.WriteString(w, `{"total_usage":0}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		app := newTestApplication(t, strategyPriority, time.Now,
+			testAccount("a", server.URL+"/v1", "balance-key"),
+		)
+		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+		if balance.Status != "ok" || !balance.Unlimited || balance.Scope != balanceScopeTokenOnly {
+			t.Fatalf("dashboard sentinel became an actual balance: %#v", balance)
 		}
 	})
 
@@ -766,6 +910,247 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 	})
 }
 
+func TestNewAPIAccessTokenUsesActualAccountQuota(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		tokenQuota     int
+		tokenUnlimited bool
+		wantAmount     float64
+		wantLimitedBy  string
+	}{
+		{name: "unlimited token is limited by account", tokenUnlimited: true, wantAmount: 5, wantLimitedBy: "account"},
+		{name: "finite token is the lower limit", tokenQuota: 1500000, wantAmount: 3, wantLimitedBy: "token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var selfCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/usage/token/":
+					if r.Header.Get("Authorization") != "Bearer model-key" {
+						t.Errorf("token usage authorization=%q", r.Header.Get("Authorization"))
+					}
+					_, _ = io.WriteString(w, `{"data":{"total_available":`+strconv.Itoa(test.tokenQuota)+
+						`,"unlimited_quota":`+strconv.FormatBool(test.tokenUnlimited)+`}}`)
+				case "/api/user/self":
+					selfCalls.Add(1)
+					if r.Header.Get("Authorization") != "Bearer access-token" ||
+						r.Header.Get("New-Api-User") != "42" || r.Header.Get("Cookie") != "" {
+						t.Errorf("self headers authorization=%q user=%q cookie=%q",
+							r.Header.Get("Authorization"), r.Header.Get("New-Api-User"), r.Header.Get("Cookie"))
+					}
+					_, _ = io.WriteString(w, `{"success":true,"data":{"quota":2500000}}`)
+				case "/api/status":
+					if r.Header.Get("Authorization") != "Bearer model-key" {
+						t.Errorf("status authorization=%q", r.Header.Get("Authorization"))
+					}
+					_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			account := testAccount("a", server.URL+"/v1", "model-key")
+			account.NewAPIAuthMode = newAPIAuthAccessToken
+			account.NewAPIUserID = 42
+			account.NewAPISecret = "access-token"
+			app := newTestApplication(t, strategyPriority, time.Now, account)
+			balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+			if balance.Status != "ok" || balance.Amount != test.wantAmount || balance.Unit != "USD" ||
+				balance.Unlimited || balance.Scope != balanceScopeActual || balance.LimitedBy != test.wantLimitedBy ||
+				selfCalls.Load() != 1 {
+				t.Fatalf("unexpected actual balance: %#v selfCalls=%d", balance, selfCalls.Load())
+			}
+		})
+	}
+
+	t.Run("dashboard fallback unlimited token is limited by account", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/usage/token/":
+				http.NotFound(w, r)
+			case "/v1/dashboard/billing/subscription":
+				_, _ = io.WriteString(w, `{"hard_limit_usd":100000000}`)
+			case "/v1/dashboard/billing/usage":
+				_, _ = io.WriteString(w, `{"total_usage":0}`)
+			case "/api/status":
+				_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+			case "/api/user/self":
+				if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("New-Api-User") != "42" {
+					t.Errorf("self authorization=%q user=%q", r.Header.Get("Authorization"), r.Header.Get("New-Api-User"))
+				}
+				_, _ = io.WriteString(w, `{"success":true,"data":{"quota":2500000}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		account := testAccount("a", server.URL+"/v1", "model-key")
+		account.NewAPIAuthMode = newAPIAuthAccessToken
+		account.NewAPIUserID = 42
+		account.NewAPISecret = "access-token"
+		app := newTestApplication(t, strategyPriority, time.Now, account)
+		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+		if balance.Status != "ok" || balance.Amount != 5 || balance.Unit != "USD" || balance.Unlimited ||
+			balance.Scope != balanceScopeActual || balance.LimitedBy != "account" {
+			t.Fatalf("dashboard fallback did not use actual account quota: %#v", balance)
+		}
+	})
+}
+
+func TestNewAPIPasswordSessionsAreIsolatedPerAccount(t *testing.T) {
+	var aliceLogins atomic.Int32
+	var bobLogins atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			if authorization := r.Header.Get("Authorization"); authorization != "Bearer model-alice" && authorization != "Bearer model-bob" {
+				t.Errorf("token usage authorization=%q", authorization)
+			}
+			_, _ = io.WriteString(w, `{"data":{"total_available":0,"unlimited_quota":true}}`)
+		case "/api/user/login":
+			if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Cookie") != "" {
+				t.Errorf("login method=%s content-type=%q cookie=%q", r.Method, r.Header.Get("Content-Type"), r.Header.Get("Cookie"))
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode login body: %v", err)
+				http.Error(w, "bad body", http.StatusBadRequest)
+				return
+			}
+			var userID int
+			var expectedPassword string
+			var session string
+			switch body["username"] {
+			case "alice":
+				aliceLogins.Add(1)
+				userID, expectedPassword, session = 11, "alice-password", "alice-session"
+			case "bob":
+				bobLogins.Add(1)
+				userID, expectedPassword, session = 22, "bob-password", "bob-session"
+			default:
+				t.Errorf("unexpected login body: %#v", body)
+				http.Error(w, "unknown user", http.StatusUnauthorized)
+				return
+			}
+			if len(body) != 2 || body["password"] != expectedPassword {
+				t.Errorf("wrong login body for %q: %#v", body["username"], body)
+				http.Error(w, "wrong password", http.StatusUnauthorized)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: session, Path: "/", HttpOnly: true})
+			_, _ = io.WriteString(w, `{"success":true,"data":{"id":`+strconv.Itoa(userID)+`}}`)
+		case "/api/user/self":
+			var expectedCookie string
+			var quota int
+			switch r.Header.Get("New-Api-User") {
+			case "11":
+				expectedCookie, quota = "session=alice-session", 2500000
+			case "22":
+				expectedCookie, quota = "session=bob-session", 1500000
+			default:
+				t.Errorf("unexpected self user header=%q", r.Header.Get("New-Api-User"))
+				http.Error(w, "bad user", http.StatusUnauthorized)
+				return
+			}
+			if r.Header.Get("Cookie") != expectedCookie || r.Header.Get("Authorization") != "" {
+				t.Errorf("self user=%q cookie=%q authorization=%q",
+					r.Header.Get("New-Api-User"), r.Header.Get("Cookie"), r.Header.Get("Authorization"))
+				http.Error(w, "wrong session", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true,"data":{"quota":`+strconv.Itoa(quota)+`}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	alice := testAccount("alice", server.URL+"/v1", "model-alice")
+	alice.NewAPIAuthMode, alice.NewAPIUsername, alice.NewAPISecret = newAPIAuthPassword, "alice", "alice-password"
+	bob := testAccount("bob", server.URL+"/v1", "model-bob")
+	bob.NewAPIAuthMode, bob.NewAPIUsername, bob.NewAPISecret = newAPIAuthPassword, "bob", "bob-password"
+	app := newTestApplication(t, strategyPriority, time.Now, alice, bob)
+
+	aliceBalance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+	bobBalance := app.probeBalance(context.Background(), app.cfg.Accounts[1])
+	aliceAgain := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+	if aliceBalance.Amount != 5 || bobBalance.Amount != 3 || aliceAgain.Amount != 5 ||
+		aliceLogins.Load() != 1 || bobLogins.Load() != 1 ||
+		app.runtime["alice"].NewAPISession != "session=alice-session" ||
+		app.runtime["bob"].NewAPISession != "session=bob-session" {
+		t.Fatalf("password sessions crossed accounts: amounts=%v/%v/%v logins=%d/%d",
+			aliceBalance.Amount, bobBalance.Amount, aliceAgain.Amount, aliceLogins.Load(), bobLogins.Load())
+	}
+}
+
+func TestNewAPILoginRejectsOutOfRangeUserID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "session-value", Path: "/"})
+		_, _ = io.WriteString(w, `{"success":true,"data":{"id":9223372036854775808}}`)
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-key")
+	account.NewAPIAuthMode, account.NewAPIUsername, account.NewAPISecret = newAPIAuthPassword, "user", "password"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	if _, _, err := app.loginNewAPI(context.Background(), account); err == nil {
+		t.Fatal("out-of-range New API user ID was accepted")
+	}
+}
+
+func TestNewAPIAuthFailureIsTokenOnlyAndDisablesHighestBalance(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	var selfStatus atomic.Int32
+	selfStatus.Store(http.StatusUnauthorized)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":50000000,"unlimited_quota":true}}`)
+		case "/api/user/self":
+			w.WriteHeader(int(selfStatus.Load()))
+			_, _ = io.WriteString(w, `{"success":false,"message":"invalid access token"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	failing := testAccount("failing", server.URL+"/v1", "model-key")
+	failing.NewAPIAuthMode = newAPIAuthAccessToken
+	failing.NewAPIUserID = 42
+	failing.NewAPISecret = "bad-access-token"
+	good := testAccount("good", "https://good.invalid/v1", "good-key")
+	app := newTestApplication(t, strategyHighestBalance, func() time.Time { return now }, failing, good)
+	failingBalance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+	if failingBalance.Status != "auth_error" || failingBalance.Scope != balanceScopeTokenOnly {
+		t.Fatalf("authentication failure balance=%#v", failingBalance)
+	}
+	selfStatus.Store(http.StatusInternalServerError)
+	transientFailure := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+	if transientFailure.Status != "error" {
+		t.Fatalf("transient upstream failure was misclassified: %#v", transientFailure)
+	}
+	app.runtime["failing"].Balance = failingBalance
+	app.runtime["failing"].AssignedRequests = 10
+	app.runtime["good"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 5, Unit: "USD", Scope: balanceScopeActual, LimitedBy: "account", UpdatedAt: now,
+	}
+	status := app.status()
+	selected, ok := app.selectAccount(context.Background(), map[string]bool{})
+	if status.EffectiveStrategy != strategyLeastUsed || status.FallbackReason != "balance_unavailable" ||
+		!ok || selected.ID != "good" {
+		t.Fatalf("auth-only balance participated in highest balance: status=%#v selected=%q ok=%v", status, selected.ID, ok)
+	}
+}
+
 func TestNumberValueRejectsNonFiniteValues(t *testing.T) {
 	for _, value := range []any{"NaN", "+Inf", math.NaN(), math.Inf(1)} {
 		if number, ok := numberValue(value); ok {
@@ -774,8 +1159,36 @@ func TestNumberValueRejectsNonFiniteValues(t *testing.T) {
 	}
 }
 
+func TestConvertNewAPIQuotaDisplayTypes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		status     map[string]any
+		wantAmount float64
+		wantUnit   string
+		wantLabel  string
+	}{
+		{name: "USD", status: map[string]any{"quota_display_type": "USD", "quota_per_unit": 500000.0}, wantAmount: 2, wantUnit: "USD", wantLabel: "USD"},
+		{name: "CNY", status: map[string]any{"quota_display_type": "CNY", "quota_per_unit": 500000.0, "usd_exchange_rate": 7.0}, wantAmount: 14, wantUnit: "CNY", wantLabel: "CNY"},
+		{name: "TOKENS", status: map[string]any{"quota_display_type": "TOKENS"}, wantAmount: 1000000, wantUnit: "TOKENS", wantLabel: "TOKENS"},
+		{name: "CUSTOM", status: map[string]any{"quota_display_type": "CUSTOM", "quota_per_unit": 500000.0, "custom_currency_exchange_rate": 2.0, "custom_currency_symbol": "点"}, wantAmount: 4, wantUnit: "CUSTOM:点:2", wantLabel: "点"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			amount, unit, label, ok := convertNewAPIQuota(1000000, test.status)
+			if !ok || amount != test.wantAmount || unit != test.wantUnit || label != test.wantLabel {
+				t.Fatalf("conversion=%v %q %q ok=%v", amount, unit, label, ok)
+			}
+		})
+	}
+	if _, _, _, ok := convertNewAPIQuota(1000000, map[string]any{
+		"quota_display_type": "CNY", "quota_per_unit": 500000.0,
+	}); ok {
+		t.Fatal("CNY conversion without exchange rate was accepted")
+	}
+}
+
 func TestHighestBalanceRefreshesStaleAccountsBeforeSelection(t *testing.T) {
 	var usageCalls atomic.Int32
+	var selfCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -786,6 +1199,17 @@ func TestHighestBalanceRefreshesStaleAccountsBeforeSelection(t *testing.T) {
 				amount = 1500000
 			}
 			_, _ = io.WriteString(w, `{"data":{"total_available":`+strconv.Itoa(amount)+`}}`)
+		case "/api/user/self":
+			selfCalls.Add(1)
+			expectedToken := "Bearer access-a"
+			if r.Header.Get("New-Api-User") == "22" {
+				expectedToken = "Bearer access-b"
+			}
+			if r.Header.Get("Authorization") != expectedToken ||
+				(r.Header.Get("New-Api-User") != "11" && r.Header.Get("New-Api-User") != "22") {
+				t.Errorf("self authorization=%q user=%q", r.Header.Get("Authorization"), r.Header.Get("New-Api-User"))
+			}
+			_, _ = io.WriteString(w, `{"success":true,"data":{"quota":10000000}}`)
 		case "/api/status":
 			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
 		default:
@@ -793,13 +1217,17 @@ func TestHighestBalanceRefreshesStaleAccountsBeforeSelection(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	first := testAccount("a", server.URL+"/v1", "key-a")
+	first.NewAPIAuthMode, first.NewAPIUserID, first.NewAPISecret = newAPIAuthAccessToken, 11, "access-a"
+	second := testAccount("b", server.URL+"/v1", "key-b")
+	second.NewAPIAuthMode, second.NewAPIUserID, second.NewAPISecret = newAPIAuthAccessToken, 22, "access-b"
 	app := newTestApplication(t, strategyHighestBalance, time.Now,
-		testAccount("a", server.URL+"/v1", "key-a"),
-		testAccount("b", server.URL+"/v1", "key-b"),
+		first, second,
 	)
 	account, ok := app.selectAccount(context.Background(), map[string]bool{})
-	if !ok || account.ID != "b" || usageCalls.Load() != 2 {
-		t.Fatalf("selection=%q ok=%v usageCalls=%d", account.ID, ok, usageCalls.Load())
+	if !ok || account.ID != "b" || usageCalls.Load() != 2 || selfCalls.Load() != 2 {
+		t.Fatalf("highest balance selection=%q ok=%v usageCalls=%d selfCalls=%d",
+			account.ID, ok, usageCalls.Load(), selfCalls.Load())
 	}
 	if app.status().EffectiveStrategy != strategyHighestBalance {
 		t.Fatalf("fresh comparable balances did not enable highest_balance: %#v", app.status())
@@ -885,9 +1313,27 @@ func TestCanceledBalanceRefreshKeepsLastSuccessfulValue(t *testing.T) {
 	app.runtime["a"].Balance = previous
 	entered := make(chan struct{})
 	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		close(entered)
-		<-r.Context().Done()
-		return nil, r.Context().Err()
+		status := http.StatusOK
+		body := ""
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			status = http.StatusNotFound
+			body = "not found"
+		case "/v1/dashboard/billing/subscription":
+			body = `{"hard_limit_usd":10}`
+		case "/v1/dashboard/billing/usage":
+			body = `{"total_usage":0}`
+		case "/api/status":
+			close(entered)
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		default:
+			return nil, errors.New("unexpected balance path: " + r.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: status, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(body)), Request: r,
+		}, nil
 	})}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -1110,6 +1556,13 @@ func TestStructuredQuotaError(t *testing.T) {
 		if got := structuredQuotaError([]byte(test.body)); got != test.want {
 			t.Fatalf("structuredQuotaError(%s)=%v, want %v", test.body, got, test.want)
 		}
+	}
+}
+
+func TestRedactSecretsHandlesOverlappingValues(t *testing.T) {
+	message := redactSecrets("credential abc123", "abc", "abc123")
+	if message != "credential [已隐藏]" {
+		t.Fatalf("overlapping secret was only partially redacted: %q", message)
 	}
 }
 

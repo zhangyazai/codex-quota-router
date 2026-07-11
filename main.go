@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/base64"
@@ -28,7 +29,7 @@ import (
 const (
 	listenAddress      = "127.0.0.1:4000"
 	applicationVersion = "0.2.1"
-	configVersion      = 2
+	configVersion      = 3
 	configDirectory    = "codex-quota-router"
 	configFilename     = "config.dat"
 	maxAdminBody       = 1 << 20
@@ -49,18 +50,34 @@ const (
 	strategyHighestBalance = "highest_balance"
 )
 
+const (
+	newAPIAuthAPIKey      = "api_key"
+	newAPIAuthPassword    = "password"
+	newAPIAuthAccessToken = "access_token"
+	newAPIUnlimitedLimit  = 100000000
+
+	balanceScopeActual    = "actual"
+	balanceScopeTokenOnly = "token_only"
+)
+
+var errNewAPIAuthentication = errors.New("New API authentication failed")
+
 //go:embed web/index.html
 var indexHTML []byte
 
 type accountConfig struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	BaseURL       string `json:"baseUrl"`
-	APIKey        string `json:"apiKey"`
-	Enabled       bool   `json:"enabled"`
-	Revision      int    `json:"revision"`
-	Verified      bool   `json:"verified"`
-	BlockedReason string `json:"blockedReason,omitempty"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	BaseURL        string `json:"baseUrl"`
+	APIKey         string `json:"apiKey"`
+	NewAPIAuthMode string `json:"newApiAuthMode,omitempty"`
+	NewAPIUsername string `json:"newApiUsername,omitempty"`
+	NewAPIUserID   int    `json:"newApiUserId,omitempty"`
+	NewAPISecret   string `json:"newApiSecret,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	Revision       int    `json:"revision"`
+	Verified       bool   `json:"verified"`
+	BlockedReason  string `json:"blockedReason,omitempty"`
 }
 
 type storedConfig struct {
@@ -95,12 +112,17 @@ type legacyStoredConfig struct {
 }
 
 type accountInput struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	BaseURL     string `json:"baseUrl"`
-	APIKey      string `json:"apiKey"`
-	Enabled     *bool  `json:"enabled"`
-	ClearAPIKey bool   `json:"clearApiKey"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	BaseURL           string `json:"baseUrl"`
+	APIKey            string `json:"apiKey"`
+	NewAPIAuthMode    string `json:"newApiAuthMode"`
+	NewAPIUsername    string `json:"newApiUsername"`
+	NewAPIUserID      int    `json:"newApiUserId"`
+	NewAPISecret      string `json:"newApiSecret"`
+	Enabled           *bool  `json:"enabled"`
+	ClearAPIKey       bool   `json:"clearApiKey"`
+	ClearNewAPISecret bool   `json:"clearNewApiSecret"`
 }
 
 type saveRequest struct {
@@ -119,14 +141,18 @@ type testRequest struct {
 }
 
 type publicAccount struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	BaseURL       string `json:"baseUrl"`
-	Enabled       bool   `json:"enabled"`
-	Revision      int    `json:"revision"`
-	Verified      bool   `json:"verified"`
-	BlockedReason string `json:"blockedReason,omitempty"`
-	KeyConfigured bool   `json:"keyConfigured"`
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	BaseURL                string `json:"baseUrl"`
+	NewAPIAuthMode         string `json:"newApiAuthMode"`
+	NewAPIUsername         string `json:"newApiUsername,omitempty"`
+	NewAPIUserID           int    `json:"newApiUserId,omitempty"`
+	Enabled                bool   `json:"enabled"`
+	Revision               int    `json:"revision"`
+	Verified               bool   `json:"verified"`
+	BlockedReason          string `json:"blockedReason,omitempty"`
+	KeyConfigured          bool   `json:"keyConfigured"`
+	NewAPISecretConfigured bool   `json:"newApiSecretConfigured"`
 }
 
 type publicConfig struct {
@@ -146,7 +172,11 @@ type balanceSnapshot struct {
 	Unit         string
 	DisplayLabel string
 	Unlimited    bool
+	Scope        string
+	LimitedBy    string
 	UpdatedAt    time.Time
+	hardLimit    float64
+	hasHardLimit bool
 }
 
 type publicBalance struct {
@@ -155,6 +185,8 @@ type publicBalance struct {
 	Unit         string  `json:"unit,omitempty"`
 	DisplayLabel string  `json:"displayLabel,omitempty"`
 	Unlimited    bool    `json:"unlimited"`
+	Scope        string  `json:"scope,omitempty"`
+	LimitedBy    string  `json:"limitedBy,omitempty"`
 	UpdatedAt    string  `json:"updatedAt,omitempty"`
 	Fresh        bool    `json:"fresh"`
 }
@@ -165,6 +197,9 @@ type accountRuntime struct {
 	AssignedRequests uint64
 	LastUsedAt       time.Time
 	Balance          balanceSnapshot
+	NewAPISession    string
+	NewAPIUserID     int
+	NewAPIAuthHash   [sha256.Size]byte
 }
 
 type accountStatus struct {
@@ -485,6 +520,15 @@ func normalizeAndValidateConfig(cfg *storedConfig) error {
 		account.Name = strings.TrimSpace(account.Name)
 		account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
 		account.APIKey = strings.TrimSpace(account.APIKey)
+		rawAuthMode := strings.TrimSpace(strings.ToLower(account.NewAPIAuthMode))
+		if !validNewAPIAuthMode(rawAuthMode) {
+			return fmt.Errorf("账号 %s 的 New API 余额认证方式无效", account.Name)
+		}
+		account.NewAPIAuthMode = normalizeNewAPIAuthMode(rawAuthMode)
+		account.NewAPIUsername = strings.TrimSpace(account.NewAPIUsername)
+		if account.NewAPIAuthMode == newAPIAuthAccessToken {
+			account.NewAPISecret = normalizeBearerToken(account.NewAPISecret)
+		}
 		account.BlockedReason = strings.TrimSpace(strings.ToLower(account.BlockedReason))
 		if account.ID == "" {
 			return fmt.Errorf("账号 ID 不能为空")
@@ -504,6 +548,22 @@ func normalizeAndValidateConfig(cfg *storedConfig) error {
 		}
 		if account.BlockedReason != "" && account.BlockedReason != "quota" && account.BlockedReason != "unauthorized" {
 			return fmt.Errorf("账号 %s 的阻塞原因无效", account.Name)
+		}
+		switch account.NewAPIAuthMode {
+		case newAPIAuthAPIKey:
+			account.NewAPIUsername = ""
+			account.NewAPIUserID = 0
+			account.NewAPISecret = ""
+		case newAPIAuthPassword:
+			account.NewAPIUserID = 0
+			if account.NewAPIUsername == "" || account.NewAPISecret == "" {
+				return fmt.Errorf("账号 %s 的 New API 用户名和密码不能为空", account.Name)
+			}
+		case newAPIAuthAccessToken:
+			account.NewAPIUsername = ""
+			if account.NewAPIUserID <= 0 || account.NewAPISecret == "" {
+				return fmt.Errorf("账号 %s 的 New API 用户 ID 和 Access Token 不能为空", account.Name)
+			}
 		}
 		if account.BaseURL == "" {
 			continue
@@ -566,6 +626,89 @@ func normalizedOrigin(value string) (string, bool) {
 func validStrategy(strategy string) bool {
 	return strategy == strategyPriority || strategy == strategyRoundRobin ||
 		strategy == strategyLeastUsed || strategy == strategyHighestBalance
+}
+
+func normalizeNewAPIAuthMode(mode string) string {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return newAPIAuthAPIKey
+	}
+	return mode
+}
+
+func validNewAPIAuthMode(mode string) bool {
+	return mode == "" || mode == newAPIAuthAPIKey || mode == newAPIAuthPassword || mode == newAPIAuthAccessToken
+}
+
+func normalizeAccountInput(input *accountInput) error {
+	input.ID = strings.TrimSpace(input.ID)
+	input.Name = strings.TrimSpace(input.Name)
+	input.BaseURL = strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
+	input.APIKey = strings.TrimSpace(input.APIKey)
+	input.NewAPIUsername = strings.TrimSpace(input.NewAPIUsername)
+	mode := strings.TrimSpace(strings.ToLower(input.NewAPIAuthMode))
+	if !validNewAPIAuthMode(mode) {
+		return fmt.Errorf("New API 余额认证方式无效")
+	}
+	input.NewAPIAuthMode = normalizeNewAPIAuthMode(mode)
+	if input.NewAPIAuthMode == newAPIAuthAccessToken {
+		input.NewAPISecret = normalizeBearerToken(input.NewAPISecret)
+	}
+	return nil
+}
+
+func normalizeBearerToken(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 7 && strings.EqualFold(value[:7], "Bearer ") {
+		return strings.TrimSpace(value[7:])
+	}
+	return value
+}
+
+func applyNewAPIAuthInput(account *accountConfig, previous accountConfig, input accountInput) error {
+	mode := input.NewAPIAuthMode
+	if mode == newAPIAuthAPIKey {
+		account.NewAPIAuthMode = mode
+		account.NewAPIUsername = ""
+		account.NewAPIUserID = 0
+		account.NewAPISecret = ""
+		return nil
+	}
+
+	previousMode := normalizeNewAPIAuthMode(previous.NewAPIAuthMode)
+	identifierChanged := previousMode != mode
+	switch mode {
+	case newAPIAuthPassword:
+		identifierChanged = identifierChanged || previous.NewAPIUsername != input.NewAPIUsername
+		account.NewAPIUsername = input.NewAPIUsername
+		account.NewAPIUserID = 0
+	case newAPIAuthAccessToken:
+		identifierChanged = identifierChanged || previous.NewAPIUserID != input.NewAPIUserID
+		account.NewAPIUsername = ""
+		account.NewAPIUserID = input.NewAPIUserID
+	}
+
+	secret := input.NewAPISecret
+	if input.ClearNewAPISecret {
+		secret = ""
+	} else if secret == "" && !identifierChanged {
+		secret = previous.NewAPISecret
+	}
+	if secret == "" {
+		if mode == newAPIAuthPassword {
+			return fmt.Errorf("New API 用户名或密码变化时必须重新填写密码")
+		}
+		return fmt.Errorf("New API 用户 ID 或认证方式变化时必须重新填写 Access Token")
+	}
+	account.NewAPIAuthMode = mode
+	account.NewAPISecret = secret
+	return nil
+}
+
+func newAPIAuthChanged(left, right accountConfig) bool {
+	return normalizeNewAPIAuthMode(left.NewAPIAuthMode) != normalizeNewAPIAuthMode(right.NewAPIAuthMode) ||
+		left.NewAPIUsername != right.NewAPIUsername || left.NewAPIUserID != right.NewAPIUserID ||
+		left.NewAPISecret != right.NewAPISecret
 }
 
 func (a *application) routes() http.Handler {
@@ -695,9 +838,11 @@ func (a *application) publicConfig() publicConfig {
 	accounts := make([]publicAccount, 0, len(a.cfg.Accounts))
 	for _, account := range a.cfg.Accounts {
 		accounts = append(accounts, publicAccount{
-			ID: account.ID, Name: account.Name, BaseURL: account.BaseURL, Enabled: account.Enabled,
-			Revision: account.Revision, Verified: account.Verified, BlockedReason: account.BlockedReason,
-			KeyConfigured: account.APIKey != "",
+			ID: account.ID, Name: account.Name, BaseURL: account.BaseURL,
+			NewAPIAuthMode: normalizeNewAPIAuthMode(account.NewAPIAuthMode), NewAPIUsername: account.NewAPIUsername,
+			NewAPIUserID: account.NewAPIUserID, NewAPISecretConfigured: account.NewAPISecret != "",
+			Enabled: account.Enabled, Revision: account.Revision, Verified: account.Verified,
+			BlockedReason: account.BlockedReason, KeyConfigured: account.APIKey != "",
 		})
 	}
 	return publicConfig{
@@ -767,9 +912,14 @@ func publicBalanceAt(balance balanceSnapshot, now time.Time) publicBalance {
 	if status == "" {
 		status = "unknown"
 	}
+	scope := balance.Scope
+	if scope == "" && status == "ok" {
+		scope = balanceScopeActual
+	}
 	return publicBalance{
 		Status: status, Amount: balance.Amount, Unit: balance.Unit, DisplayLabel: balance.DisplayLabel,
-		Unlimited: balance.Unlimited, UpdatedAt: updatedAt, Fresh: balanceFresh(balance, now),
+		Unlimited: balance.Unlimited, Scope: scope, LimitedBy: balance.LimitedBy,
+		UpdatedAt: updatedAt, Fresh: balanceFresh(balance, now),
 	}
 }
 
@@ -798,6 +948,9 @@ func (a *application) effectiveStrategyLocked(now time.Time) (string, string) {
 		}
 		if runtime.Balance.Status != "ok" {
 			return strategyLeastUsed, "balance_unavailable"
+		}
+		if runtime.Balance.Scope == balanceScopeTokenOnly {
+			return strategyLeastUsed, "balance_account_unverified"
 		}
 		if runtime.Balance.Unlimited {
 			continue
@@ -865,10 +1018,11 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 		seen := make(map[string]bool, len(*request.Accounts))
 		next := make([]accountConfig, 0, len(*request.Accounts))
 		for index, input := range *request.Accounts {
-			input.ID = strings.TrimSpace(input.ID)
-			input.Name = strings.TrimSpace(input.Name)
-			input.BaseURL = strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
-			input.APIKey = strings.TrimSpace(input.APIKey)
+			if err := normalizeAccountInput(&input); err != nil {
+				a.mu.Unlock()
+				writeAdminError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if input.ID == "" {
 				if input.ClearAPIKey || input.APIKey == "" {
 					a.mu.Unlock()
@@ -897,6 +1051,11 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 					ID: id, Name: input.Name, BaseURL: input.BaseURL, APIKey: input.APIKey,
 					Enabled: enabled, Revision: 1,
 				}
+				if err := applyNewAPIAuthInput(&account, accountConfig{}, input); err != nil {
+					a.mu.Unlock()
+					writeAdminError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 				if account.Name == "" {
 					account.Name = fmt.Sprintf("账号 %d", index+1)
 				}
@@ -917,10 +1076,16 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			seen[input.ID] = true
-			if old.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey &&
-				baseURLMovesToDifferentOrigin(old.BaseURL, input.BaseURL) {
+			originChanged := baseURLMovesToDifferentOrigin(old.BaseURL, input.BaseURL)
+			if old.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey && originChanged {
 				a.mu.Unlock()
 				writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
+				return
+			}
+			if old.NewAPISecret != "" && input.NewAPISecret == "" && !input.ClearNewAPISecret &&
+				input.NewAPIAuthMode != newAPIAuthAPIKey && originChanged {
+				a.mu.Unlock()
+				writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
 				return
 			}
 			account := old
@@ -934,14 +1099,22 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 			} else if input.APIKey != "" {
 				account.APIKey = input.APIKey
 			}
+			if err := applyNewAPIAuthInput(&account, old, input); err != nil {
+				a.mu.Unlock()
+				writeAdminError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if account.Name == "" {
 				account.Name = old.Name
 			}
-			if account.BaseURL != old.BaseURL || account.APIKey != old.APIKey {
+			proxyChanged := account.BaseURL != old.BaseURL || account.APIKey != old.APIKey
+			if proxyChanged || newAPIAuthChanged(account, old) {
 				account.Revision = old.Revision + 1
+				changedAccounts[account.ID] = true
+			}
+			if proxyChanged {
 				account.Verified = false
 				account.BlockedReason = ""
-				changedAccounts[account.ID] = true
 			}
 			next = append(next, account)
 		}
@@ -1023,18 +1196,31 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	}
 	candidate := saved
 	if request.Candidate != nil {
-		if savedFound && saved.APIKey != "" && strings.TrimSpace(request.Candidate.APIKey) == "" &&
-			!request.Candidate.ClearAPIKey &&
-			baseURLMovesToDifferentOrigin(saved.BaseURL, request.Candidate.BaseURL) {
+		input := *request.Candidate
+		if err := normalizeAccountInput(&input); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		originChanged := savedFound && baseURLMovesToDifferentOrigin(saved.BaseURL, input.BaseURL)
+		if savedFound && saved.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey && originChanged {
 			writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
 			return
 		}
-		candidate.Name = strings.TrimSpace(request.Candidate.Name)
-		candidate.BaseURL = strings.TrimRight(strings.TrimSpace(request.Candidate.BaseURL), "/")
-		if request.Candidate.ClearAPIKey {
+		if savedFound && saved.NewAPISecret != "" && input.NewAPISecret == "" && !input.ClearNewAPISecret &&
+			input.NewAPIAuthMode != newAPIAuthAPIKey && originChanged {
+			writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
+			return
+		}
+		candidate.Name = input.Name
+		candidate.BaseURL = input.BaseURL
+		if input.ClearAPIKey {
 			candidate.APIKey = ""
-		} else if strings.TrimSpace(request.Candidate.APIKey) != "" {
-			candidate.APIKey = strings.TrimSpace(request.Candidate.APIKey)
+		} else if input.APIKey != "" {
+			candidate.APIKey = input.APIKey
+		}
+		if err := applyNewAPIAuthInput(&candidate, saved, input); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	if candidate.Name == "" {
@@ -1064,7 +1250,7 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "请先填写测试模型")
 		return
 	}
-	matchesSaved := savedFound && candidate.BaseURL == saved.BaseURL && candidate.APIKey == saved.APIKey
+	matchesSaved := savedFound && sameAccountRevision(saved, candidate)
 	ctx, cancel := context.WithTimeout(r.Context(), upstreamTestTime)
 	defer cancel()
 	payload, _ := json.Marshal(map[string]any{
@@ -1098,15 +1284,19 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	message := "连接成功"
 	balance := balanceSnapshot{Status: "unknown"}
 	if !ok {
-		message = redactSecret(upstreamErrorMessage(response.StatusCode, body), candidate.APIKey)
+		message = redactSecrets(upstreamErrorMessage(response.StatusCode, body), candidate.APIKey, candidate.NewAPISecret)
 	} else {
 		if matchesSaved {
 			a.markAccountTestSucceeded(saved)
 		}
 		balanceContext, balanceCancel := newBalanceRefreshContext(ctx)
 		balance = a.probeBalance(balanceContext, candidate)
+		balanceComplete := balanceContext.Err() == nil
 		balanceCancel()
-		if matchesSaved {
+		if !balanceComplete {
+			balance = balanceSnapshot{Status: "error", UpdatedAt: a.now()}
+		}
+		if matchesSaved && balanceComplete {
 			a.applyBalance(saved, balance)
 		}
 	}
@@ -1460,7 +1650,10 @@ func (a *application) cooldownAccount(expected accountConfig) {
 
 func sameAccountRevision(current, expected accountConfig) bool {
 	return current.ID == expected.ID && current.Revision == expected.Revision &&
-		current.BaseURL == expected.BaseURL && current.APIKey == expected.APIKey
+		current.BaseURL == expected.BaseURL && current.APIKey == expected.APIKey &&
+		normalizeNewAPIAuthMode(current.NewAPIAuthMode) == normalizeNewAPIAuthMode(expected.NewAPIAuthMode) &&
+		current.NewAPIUsername == expected.NewAPIUsername && current.NewAPIUserID == expected.NewAPIUserID &&
+		current.NewAPISecret == expected.NewAPISecret
 }
 
 func (a *application) applyBalance(expected accountConfig, balance balanceSnapshot) {
@@ -1471,6 +1664,57 @@ func (a *application) applyBalance(expected accountConfig, balance balanceSnapsh
 		return
 	}
 	a.runtimeForLocked(a.cfg.Accounts[index]).Balance = balance
+}
+
+func newAPIAuthHash(account accountConfig) [sha256.Size]byte {
+	value := strings.Join([]string{
+		account.BaseURL,
+		normalizeNewAPIAuthMode(account.NewAPIAuthMode),
+		account.NewAPIUsername,
+		strconv.Itoa(account.NewAPIUserID),
+		account.NewAPISecret,
+	}, "\x00")
+	return sha256.Sum256([]byte(value))
+}
+
+func (a *application) cachedNewAPISession(expected accountConfig) (string, int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return "", 0
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	if runtime.NewAPIAuthHash != newAPIAuthHash(expected) {
+		return "", 0
+	}
+	return runtime.NewAPISession, runtime.NewAPIUserID
+}
+
+func (a *application) cacheNewAPISession(expected accountConfig, cookie string, userID int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	runtime.NewAPISession = cookie
+	runtime.NewAPIUserID = userID
+	runtime.NewAPIAuthHash = newAPIAuthHash(expected)
+}
+
+func (a *application) clearNewAPISession(expected accountConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	runtime.NewAPISession = ""
+	runtime.NewAPIUserID = 0
+	runtime.NewAPIAuthHash = [sha256.Size]byte{}
 }
 
 func (a *application) sendUpstream(ctx context.Context, original *http.Request, body []byte, account accountConfig) (*http.Response, error) {
@@ -1575,7 +1819,7 @@ func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, 
 			defer wait.Done()
 			for account := range jobs {
 				balance := a.probeBalance(ctx, account)
-				if ctx.Err() == nil || balance.Status != "error" {
+				if ctx.Err() == nil {
 					a.applyBalance(account, balance)
 				}
 			}
@@ -1617,46 +1861,308 @@ func (a *application) probeBalance(ctx context.Context, account accountConfig) b
 		return result
 	}
 	if status == http.StatusNotFound {
-		return a.probeDashboardBalance(ctx, account, checkedAt)
+		return a.probeBalanceFallback(ctx, account, checkedAt)
 	}
 	if status < 200 || status >= 300 {
 		return result
 	}
 	payload, ok := decodeJSONObject(body)
 	if !ok {
-		return a.probeDashboardBalance(ctx, account, checkedAt)
+		return a.probeBalanceFallback(ctx, account, checkedAt)
 	}
 	data := nestedObject(payload, "data")
 	unlimited, _ := boolValue(data["unlimited_quota"])
 	total, hasTotal := numberValue(data["total_available"])
 	if !unlimited && !hasTotal {
-		return a.probeDashboardBalance(ctx, account, checkedAt)
+		return a.probeBalanceFallback(ctx, account, checkedAt)
 	}
 	result.Status = "ok"
 	result.Amount = total
 	result.Unlimited = unlimited
+	result.Scope = balanceScopeTokenOnly
 	result.DisplayLabel = "站点额度"
-	statusURL, statusErr := balanceAPIURL(account.BaseURL, "/api/status")
-	if statusErr != nil {
-		return result
+
+	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) != newAPIAuthAPIKey {
+		accountQuota, quotaErr := a.probeNewAPIAccountQuota(ctx, account)
+		if quotaErr != nil {
+			result.Status = "error"
+			if errors.Is(quotaErr, errNewAPIAuthentication) {
+				result.Status = "auth_error"
+			}
+			return result
+		}
+		if accountQuota < 0 {
+			accountQuota = 0
+		}
+		result.Scope = balanceScopeActual
+		result.Unlimited = false
+		if unlimited || accountQuota < result.Amount {
+			result.Amount = accountQuota
+			result.LimitedBy = "account"
+		} else {
+			result.LimitedBy = "token"
+		}
 	}
-	statusCode, statusBody, statusErr := a.getUpstreamJSON(ctx, statusURL, account.APIKey)
+
+	statusData, statusCode, statusErr := a.getNewAPIStatus(ctx, account)
 	if statusErr != nil || statusCode < 200 || statusCode >= 300 {
 		return result
 	}
-	statusPayload, ok := decodeJSONObject(statusBody)
-	if !ok {
-		return result
-	}
-	statusData := nestedObject(statusPayload, "data")
-	perUnit, hasPerUnit := numberValue(statusData["quota_per_unit"])
-	unit := displayUnit(statusData["quota_display_type"])
-	if hasPerUnit && perUnit > 0 && unit != "" {
-		result.Amount /= perUnit
+	if amount, unit, label, converted := convertNewAPIQuota(result.Amount, statusData); converted {
+		result.Amount = amount
 		result.Unit = unit
-		result.DisplayLabel = unit
+		result.DisplayLabel = label
+	}
+
+	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) == newAPIAuthAPIKey && result.Unlimited {
+		dashboard := a.probeDashboardBalance(ctx, account, checkedAt)
+		if dashboard.Status == "ok" {
+			if dashboard.hasHardLimit && result.Unit != "" {
+				dashboard.Unit = result.Unit
+				dashboard.DisplayLabel = result.DisplayLabel
+			}
+			comparable := result.Unit == dashboard.Unit
+			switch {
+			case comparable && result.Unlimited && dashboard.hasHardLimit && dashboard.hardLimit < newAPIUnlimitedLimit:
+				dashboard.Scope = balanceScopeActual
+				dashboard.LimitedBy = "account"
+				return dashboard
+			}
+		}
 	}
 	return result
+}
+
+func (a *application) probeBalanceFallback(ctx context.Context, account accountConfig, checkedAt time.Time) balanceSnapshot {
+	dashboard := a.probeDashboardBalance(ctx, account, checkedAt)
+	if dashboard.Status != "ok" {
+		return dashboard
+	}
+	dashboard.Scope = balanceScopeTokenOnly
+	statusData, statusCode, statusErr := a.getNewAPIStatus(ctx, account)
+	if statusCode == http.StatusNotFound {
+		if dashboard.hasHardLimit && dashboard.hardLimit >= newAPIUnlimitedLimit {
+			dashboard.Unlimited = true
+			return dashboard
+		}
+		dashboard.Scope = balanceScopeActual
+		return dashboard
+	}
+	if statusErr != nil || statusCode < 200 || statusCode >= 300 {
+		return dashboard
+	}
+	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) == newAPIAuthAPIKey {
+		if dashboard.hasHardLimit && dashboard.hardLimit >= newAPIUnlimitedLimit {
+			dashboard.Unlimited = true
+		}
+		return dashboard
+	}
+
+	accountQuota, quotaErr := a.probeNewAPIAccountQuota(ctx, account)
+	if quotaErr != nil {
+		dashboard.Status = "error"
+		if errors.Is(quotaErr, errNewAPIAuthentication) {
+			dashboard.Status = "auth_error"
+		}
+		return dashboard
+	}
+	if accountQuota < 0 {
+		accountQuota = 0
+	}
+	accountAmount, accountUnit, accountLabel, converted := convertNewAPIQuota(accountQuota, statusData)
+	if !converted {
+		dashboard.Status = "error"
+		return dashboard
+	}
+	if dashboard.hasHardLimit {
+		dashboard.Unit = accountUnit
+		dashboard.DisplayLabel = accountLabel
+	}
+	if dashboard.Unit != accountUnit {
+		dashboard.Status = "error"
+		return dashboard
+	}
+	dashboard.Scope = balanceScopeActual
+	dashboard.Unlimited = false
+	if accountAmount < dashboard.Amount {
+		dashboard.Amount = accountAmount
+		dashboard.LimitedBy = "account"
+	} else {
+		dashboard.LimitedBy = "token"
+	}
+	return dashboard
+}
+
+func (a *application) getNewAPIStatus(ctx context.Context, account accountConfig) (map[string]any, int, error) {
+	target, err := balanceAPIURL(account.BaseURL, "/api/status")
+	if err != nil {
+		return nil, 0, err
+	}
+	status, body, err := a.getUpstreamJSON(ctx, target, account.APIKey)
+	if err != nil || status < 200 || status >= 300 {
+		return nil, status, err
+	}
+	payload, ok := decodeJSONObject(body)
+	if !ok {
+		return nil, status, errors.New("invalid New API status response")
+	}
+	return nestedObject(payload, "data"), status, nil
+}
+
+func convertNewAPIQuota(amount float64, statusData map[string]any) (float64, string, string, bool) {
+	unit := displayUnit(statusData["quota_display_type"])
+	if unit == "TOKENS" {
+		return amount, unit, unit, true
+	}
+	perUnit, hasPerUnit := numberValue(statusData["quota_per_unit"])
+	if !hasPerUnit || perUnit <= 0 {
+		return 0, "", "", false
+	}
+	amount /= perUnit
+	switch unit {
+	case "USD":
+		return amount, unit, unit, true
+	case "CNY":
+		rate, ok := numberValue(statusData["usd_exchange_rate"])
+		if !ok || rate <= 0 {
+			return 0, "", "", false
+		}
+		return amount * rate, unit, unit, true
+	case "CUSTOM":
+		rate, ok := numberValue(statusData["custom_currency_exchange_rate"])
+		if !ok || rate <= 0 {
+			return 0, "", "", false
+		}
+		label, _ := statusData["custom_currency_symbol"].(string)
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = "CUSTOM"
+		}
+		return amount * rate, fmt.Sprintf("CUSTOM:%s:%g", label, rate), label, true
+	default:
+		return 0, "", "", false
+	}
+}
+
+func (a *application) probeNewAPIAccountQuota(ctx context.Context, account accountConfig) (float64, error) {
+	switch normalizeNewAPIAuthMode(account.NewAPIAuthMode) {
+	case newAPIAuthAccessToken:
+		return a.getNewAPIUserQuota(ctx, account, "", account.NewAPIUserID)
+	case newAPIAuthPassword:
+		if cookie, userID := a.cachedNewAPISession(account); cookie != "" && userID > 0 {
+			quota, err := a.getNewAPIUserQuota(ctx, account, cookie, userID)
+			if err == nil {
+				return quota, nil
+			}
+			if !errors.Is(err, errNewAPIAuthentication) {
+				return 0, err
+			}
+			a.clearNewAPISession(account)
+		}
+		cookie, userID, err := a.loginNewAPI(ctx, account)
+		if err != nil {
+			return 0, err
+		}
+		a.cacheNewAPISession(account, cookie, userID)
+		return a.getNewAPIUserQuota(ctx, account, cookie, userID)
+	default:
+		return 0, errors.New("New API account authentication is not configured")
+	}
+}
+
+func (a *application) loginNewAPI(ctx context.Context, account accountConfig) (string, int, error) {
+	target, err := balanceAPIURL(account.BaseURL, "/api/user/login")
+	if err != nil {
+		return "", 0, err
+	}
+	body, _ := json.Marshal(map[string]string{"username": account.NewAPIUsername, "password": account.NewAPISecret})
+	status, responseBody, cookies, err := a.requestUpstreamJSON(ctx, http.MethodPost, target, body, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	if status < 200 || status >= 300 {
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return "", 0, errNewAPIAuthentication
+		}
+		return "", 0, errors.New("New API login failed")
+	}
+	payload, ok := decodeJSONObject(responseBody)
+	if !ok {
+		return "", 0, errors.New("invalid New API login response")
+	}
+	if success, exists := boolValue(payload["success"]); exists && !success {
+		return "", 0, errNewAPIAuthentication
+	}
+	data := nestedObject(payload, "data")
+	if require2FA, _ := boolValue(data["require_2fa"]); require2FA {
+		return "", 0, errNewAPIAuthentication
+	}
+	var userIDText string
+	switch value := data["id"].(type) {
+	case json.Number:
+		userIDText = value.String()
+	case string:
+		userIDText = strings.TrimSpace(value)
+	}
+	if userIDText == "" {
+		return "", 0, errors.New("New API login response has no user ID")
+	}
+	userIDValue, err := strconv.ParseInt(userIDText, 10, strconv.IntSize)
+	if err != nil || userIDValue < 1 {
+		return "", 0, errors.New("New API login response has no user ID")
+	}
+	userID := int(userIDValue)
+	cookie := cookieHeader(cookies)
+	if cookie == "" {
+		return "", 0, errors.New("New API login response has no session cookie")
+	}
+	return cookie, userID, nil
+}
+
+func (a *application) getNewAPIUserQuota(ctx context.Context, account accountConfig, cookie string, userID int) (float64, error) {
+	target, err := balanceAPIURL(account.BaseURL, "/api/user/self")
+	if err != nil {
+		return 0, err
+	}
+	headers := make(http.Header)
+	headers.Set("New-Api-User", strconv.Itoa(userID))
+	if cookie != "" {
+		headers.Set("Cookie", cookie)
+	} else {
+		headers.Set("Authorization", "Bearer "+account.NewAPISecret)
+	}
+	status, body, _, err := a.requestUpstreamJSON(ctx, http.MethodGet, target, nil, headers)
+	if err != nil {
+		return 0, err
+	}
+	if status < 200 || status >= 300 {
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return 0, errNewAPIAuthentication
+		}
+		return 0, errors.New("New API user balance request failed")
+	}
+	payload, ok := decodeJSONObject(body)
+	if !ok {
+		return 0, errors.New("invalid New API user balance response")
+	}
+	if success, exists := boolValue(payload["success"]); exists && !success {
+		return 0, errNewAPIAuthentication
+	}
+	quota, ok := numberValue(nestedObject(payload, "data")["quota"])
+	if !ok {
+		return 0, errors.New("New API user balance is missing")
+	}
+	return quota, nil
+}
+
+func cookieHeader(cookies []*http.Cookie) string {
+	parts := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie != nil && cookie.Name != "" && cookie.Value != "" && cookie.MaxAge >= 0 {
+			parts = append(parts, cookie.Name+"="+cookie.Value)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (a *application) probeDashboardBalance(ctx context.Context, account accountConfig, checkedAt time.Time) balanceSnapshot {
@@ -1727,12 +2233,15 @@ func (a *application) probeDashboardBalance(ctx context.Context, account account
 	}
 	result.Status = "ok"
 	result.Unlimited = unlimited
+	result.Scope = balanceScopeTokenOnly
 	result.Unit = unit
 	result.DisplayLabel = unit
 	if result.DisplayLabel == "" {
 		result.DisplayLabel = "站点额度"
 	}
 	result.Amount = hardLimit - totalUsage
+	result.hardLimit = hardLimit
+	result.hasHardLimit = hasHardLimit
 	if result.Amount < 0 {
 		result.Amount = 0
 	}
@@ -1740,22 +2249,32 @@ func (a *application) probeDashboardBalance(ctx context.Context, account account
 }
 
 func (a *application) getUpstreamJSON(ctx context.Context, target, apiKey string) (int, []byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+apiKey)
+	status, body, _, err := a.requestUpstreamJSON(ctx, http.MethodGet, target, nil, headers)
+	return status, body, err
+}
+
+func (a *application) requestUpstreamJSON(ctx context.Context, method, target string, body []byte, headers http.Header) (int, []byte, []*http.Cookie, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Accept", "application/json")
+	if len(body) != 0 {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	copyHeaders(request.Header, headers)
 	response, err := a.client.Do(request)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody+1))
-	if err != nil || len(body) > maxErrorBody {
-		return response.StatusCode, nil, errors.New("invalid balance response")
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody+1))
+	if err != nil || len(responseBody) > maxErrorBody {
+		return response.StatusCode, nil, nil, errors.New("invalid balance response")
 	}
-	return response.StatusCode, body, nil
+	return response.StatusCode, responseBody, response.Cookies(), nil
 }
 
 func decodeJSONObject(data []byte) (map[string]any, bool) {
@@ -1943,11 +2462,16 @@ func upstreamErrorMessage(status int, body []byte) string {
 	return fmt.Sprintf("上游返回 HTTP %d", status)
 }
 
-func redactSecret(message, secret string) string {
-	if secret == "" {
-		return message
+func redactSecrets(message string, secrets ...string) string {
+	sort.SliceStable(secrets, func(left, right int) bool { return len(secrets[left]) > len(secrets[right]) })
+	seen := make(map[string]bool, len(secrets))
+	for _, secret := range secrets {
+		if secret != "" && !seen[secret] {
+			message = strings.ReplaceAll(message, secret, "[已隐藏]")
+			seen[secret] = true
+		}
 	}
-	return strings.ReplaceAll(message, secret, "[已隐藏]")
+	return message
 }
 
 func forwardResponse(w http.ResponseWriter, response *http.Response) {
