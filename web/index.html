@@ -618,10 +618,18 @@
       padding: 0.65rem 1rem;
     }
 
-    .account-editor {
-      border-top: 1px solid var(--border);
-      padding: 1rem;
-      background: color-mix(in srgb, var(--surface-soft) 55%, var(--surface));
+    .account-dialog {
+      width: min(720px, calc(100% - 2rem));
+      overflow: hidden;
+    }
+
+    .account-dialog .dialog-body {
+      max-height: calc(100dvh - 9rem);
+      overflow-y: auto;
+    }
+
+    .account-dialog .editor-grid {
+      margin-top: 1rem;
     }
 
     .editor-grid {
@@ -1064,49 +1072,56 @@
 
       <div class="account-card-toolbar">
         <div class="button-row">
-          <button class="secondary" type="button" data-action="edit" aria-expanded="false">编辑账号</button>
+          <button class="secondary" type="button" data-action="edit">编辑账号</button>
           <button class="ghost" type="button" data-action="move-up">上移</button>
           <button class="ghost" type="button" data-action="move-down">下移</button>
         </div>
         <span class="helper" data-slot="key-state"></span>
       </div>
 
-      <div class="account-editor" data-slot="editor" hidden>
-        <div class="editor-grid">
-          <div class="field">
-            <label data-label="name">账号名称</label>
-            <input type="text" data-field="name" autocomplete="off" maxlength="100">
-            <p class="field-error" data-error="name" hidden></p>
-          </div>
-          <div class="field">
-            <label data-label="baseUrl">上游 Base URL</label>
-            <input type="url" data-field="baseUrl" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/v1">
-            <p class="helper" data-helper="baseUrl">必须是完整的 <code>http://</code> 或 <code>https://</code> 地址。</p>
-            <p class="field-error" data-error="baseUrl" hidden></p>
-          </div>
-          <div class="field full-width">
-            <div class="key-layout">
-              <div>
-                <label data-label="apiKey">API Key</label>
-                <input type="password" data-field="apiKey" autocomplete="new-password" spellcheck="false">
-                <p class="helper" data-slot="key-help" data-helper="apiKey"></p>
-                <p class="field-error" data-error="apiKey" hidden></p>
+      <dialog class="account-dialog" data-slot="editor">
+        <div class="dialog-body">
+          <h2 data-slot="editor-title">编辑账号</h2>
+          <p class="helper">修改会先保留在页面中，关闭弹窗后仍需点击“保存全部配置”才会写入服务器。</p>
+          <div class="editor-grid">
+            <div class="field">
+              <label data-label="name">账号名称</label>
+              <input type="text" data-field="name" autocomplete="off" maxlength="100">
+              <p class="field-error" data-error="name" hidden></p>
+            </div>
+            <div class="field">
+              <label data-label="baseUrl">上游 Base URL</label>
+              <input type="url" data-field="baseUrl" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/v1">
+              <p class="helper" data-helper="baseUrl">必须是完整的 <code>http://</code> 或 <code>https://</code> 地址。</p>
+              <p class="field-error" data-error="baseUrl" hidden></p>
+            </div>
+            <div class="field full-width">
+              <div class="key-layout">
+                <div>
+                  <label data-label="apiKey">API Key</label>
+                  <input type="password" data-field="apiKey" autocomplete="new-password" spellcheck="false">
+                  <p class="helper" data-slot="key-help" data-helper="apiKey"></p>
+                  <p class="field-error" data-error="apiKey" hidden></p>
+                </div>
+                <label class="check-row">
+                  <input type="checkbox" data-field="clearApiKey">
+                  <span>清除已保存的 Key</span>
+                </label>
               </div>
-              <label class="check-row">
-                <input type="checkbox" data-field="clearApiKey">
-                <span>清除已保存的 Key</span>
-              </label>
             </div>
           </div>
-        </div>
 
-        <div class="card-actions" style="margin-top: 1rem;">
-          <button class="primary" type="button" data-action="test">测试当前填写内容</button>
-          <button class="secondary" type="button" data-action="reset">恢复账号状态</button>
-          <button class="danger-button" type="button" data-action="delete">删除账号</button>
+          <div class="card-actions" style="margin-top: 1rem;">
+            <button class="primary" type="button" data-action="test">测试当前填写内容</button>
+            <button class="secondary" type="button" data-action="reset">恢复账号状态</button>
+            <button class="danger-button" type="button" data-action="delete">删除账号</button>
+          </div>
+          <p class="test-result" data-slot="test-result" role="status"></p>
         </div>
-        <p class="test-result" data-slot="test-result" role="status"></p>
-      </div>
+        <div class="dialog-actions">
+          <button class="primary" type="button" data-action="close-editor">完成</button>
+        </div>
+      </dialog>
     </li>
   </template>
 
@@ -1167,7 +1182,6 @@
       var status = createEmptyStatus();
       var codexSnippet = "";
       var dirty = false;
-      var expandedAccounts = new Set();
       var pollTimer = 0;
       var balancePollTimer = 0;
       var balanceRefreshInFlight = false;
@@ -1476,17 +1490,18 @@
         }
       }
 
-      function updateAccountControlLabels(card, account, index, expanded) {
+      function updateAccountControlLabels(card, account, index) {
         var name = account.name.trim() || "未命名账号";
         var enabled = card.querySelector('[data-field="enabled"]');
         var clearKey = card.querySelector('[data-field="clearApiKey"]');
         var labels = {
-          edit: (expanded ? "收起" : "编辑") + "账号 " + name,
+          edit: "编辑账号 " + name,
           "move-up": "上移账号 " + name + "，当前第 " + (index + 1) + " 位",
           "move-down": "下移账号 " + name + "，当前第 " + (index + 1) + " 位",
           test: "测试账号 " + name + " 当前填写的内容",
           reset: "恢复账号 " + name + " 的运行状态",
-          delete: "删除账号 " + name
+          delete: "删除账号 " + name,
+          "close-editor": (account.id ? "完成编辑账号 " : "完成添加账号 ") + name
         };
         enabled.setAttribute("aria-label", "启用账号 " + name);
         clearKey.setAttribute("aria-label", "清除账号 " + name + " 已保存的 API Key");
@@ -1505,6 +1520,7 @@
         config.accounts.forEach(function (account, index) {
           var card = elements.accountTemplate.content.firstElementChild.cloneNode(true);
           var editor = card.querySelector('[data-slot="editor"]');
+          var editorTitle = card.querySelector('[data-slot="editor-title"]');
           var editButton = card.querySelector('[data-action="edit"]');
           var enabledInput = card.querySelector('[data-field="enabled"]');
           var nameInput = card.querySelector('[data-field="name"]');
@@ -1512,8 +1528,8 @@
           var keyInput = card.querySelector('[data-field="apiKey"]');
           var clearInput = card.querySelector('[data-field="clearApiKey"]');
           var editorId = "account-" + (index + 1) + "-editor";
+          var editorTitleId = editorId + "-title";
           var uiID = accountUIID(account);
-          var expanded = expandedAccounts.has(uiID);
 
           card.dataset.accountId = uiID;
           card.querySelector('[data-slot="priority"]').textContent = String(index + 1);
@@ -1544,10 +1560,23 @@
           setFieldIdentity(card, index, "apiKey");
 
           editor.id = editorId;
-          editor.hidden = !expanded;
+          editorTitle.id = editorTitleId;
+          editorTitle.textContent = account.id ? "编辑账号" : "添加账号";
+          editor.setAttribute("aria-labelledby", editorTitleId);
+          editor.addEventListener("close", function () {
+            window.setTimeout(function () {
+              var active = document.activeElement;
+              if (!active || active === document.body || active.closest("[hidden], dialog:not([open])")) {
+                var currentCard = findCard(uiID);
+                var returnButton = currentCard && currentCard.querySelector('[data-action="edit"]');
+                if (returnButton) {
+                  returnButton.focus();
+                }
+              }
+            }, 0);
+          });
           editButton.setAttribute("aria-controls", editorId);
-          editButton.setAttribute("aria-expanded", String(expanded));
-          editButton.textContent = expanded ? "收起编辑" : "编辑账号";
+          editButton.setAttribute("aria-haspopup", "dialog");
 
           card.querySelectorAll("button[data-action]").forEach(function (button) {
             button.dataset.accountId = uiID;
@@ -1555,7 +1584,7 @@
           card.querySelector('[data-action="move-up"]').disabled = index === 0;
           card.querySelector('[data-action="move-down"]').disabled = index === config.accounts.length - 1;
           card.querySelector('[data-action="reset"]').disabled = getStatusAccount(account.id) === null;
-          updateAccountControlLabels(card, account, index, expanded);
+          updateAccountControlLabels(card, account, index);
 
           elements.accountList.appendChild(card);
           updateAccountStatus(card, account);
@@ -1821,16 +1850,13 @@
 
         if (firstInvalid) {
           var card = firstInvalid.closest(".account-card");
-          if (card) {
-            var id = card.dataset.accountId;
-            expandedAccounts.add(id);
-            var editor = card.querySelector('[data-slot="editor"]');
-            var editButton = card.querySelector('[data-action="edit"]');
-            editor.hidden = false;
-            editButton.setAttribute("aria-expanded", "true");
-            editButton.textContent = "收起编辑";
-          }
           showGlobalError("部分账号配置不完整，请修正标出的字段。");
+          if (card) {
+            var account = getAccount(card.dataset.accountId);
+            if (account) {
+              openAccountEditor(account);
+            }
+          }
           firstInvalid.focus();
           return null;
         }
@@ -1958,7 +1984,6 @@
           codexSnippet = typeof data.codexSnippet === "string"
             ? data.codexSnippet
             : (data.codexSnippet && data.codexSnippet.snippet) || "";
-          expandedAccounts.clear();
           elements.strategy.value = config.strategy;
           elements.testModel.value = config.testModel;
           elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
@@ -2045,7 +2070,6 @@
           elements.strategy.value = config.strategy;
           elements.testModel.value = config.testModel;
           elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
-          expandedAccounts.clear();
           renderAccounts();
           updateStrategyDescription();
           updatePersistentHTTPWarning();
@@ -2070,6 +2094,7 @@
         clearGlobalError();
         elements.testModel.removeAttribute("aria-invalid");
         if (!config.testModel.trim()) {
+          closeAccountEditor(account);
           elements.testModel.setAttribute("aria-invalid", "true");
           showGlobalError("测试前请填写连通性测试模型。");
           elements.testModel.focus();
@@ -2152,7 +2177,13 @@
 
       async function resetAccount(account, button) {
         clearGlobalError();
+        var card = findCard(accountUIID(account));
+        var resultElement = card && card.querySelector('[data-slot="test-result"]');
         var restoreButton = setButtonBusy(button, "正在恢复…");
+        if (resultElement) {
+          resultElement.className = "test-result";
+          resultElement.textContent = "正在恢复账号状态…";
+        }
         try {
           var data = await api("/admin/accounts/reset", {
             method: "POST",
@@ -2163,10 +2194,19 @@
           }
           status = normalizeStatus(data.status);
           updateStatusUI();
-          announce(data.message || (account.name || "账号") + " 的运行状态已恢复");
+          var message = data.message || (account.name || "账号") + " 的运行状态已恢复";
+          if (resultElement) {
+            resultElement.className = "test-result success";
+            resultElement.textContent = message;
+          }
+          announce(message);
         } catch (error) {
-          showGlobalError("恢复账号状态失败：" + error.message);
-          announce("恢复账号状态失败");
+          var failure = "恢复账号状态失败：" + error.message;
+          if (resultElement) {
+            resultElement.className = "test-result danger";
+            resultElement.textContent = failure;
+          }
+          announce(failure);
         } finally {
           restoreButton();
         }
@@ -2344,15 +2384,10 @@
           clearApiKey: false
         };
         config.accounts.push(account);
-        expandedAccounts.add(accountUIID(account));
         markDirty();
         renderAccounts();
         updateStatusUI();
-        var card = findCard(accountUIID(account));
-        var nameInput = card && card.querySelector('[data-field="name"]');
-        if (nameInput) {
-          nameInput.focus();
-        }
+        openAccountEditor(account);
         announce("已添加新账号，请填写账号名称");
       }
 
@@ -2367,8 +2402,8 @@
         }
         var nextFocusAccount = config.accounts[index + 1] || config.accounts[index - 1] || null;
         var nextFocusID = nextFocusAccount ? accountUIID(nextFocusAccount) : "";
+        closeAccountEditor(account);
         config.accounts.splice(index, 1);
-        expandedAccounts.delete(accountUIID(account));
         markDirty();
         renderAccounts();
         updateStatusUI();
@@ -2403,25 +2438,33 @@
         announce((account.name || "未命名账号") + " 已移动到第 " + (target + 1) + " 位，当前有未保存更改");
       }
 
-      function toggleEditor(account, button) {
+      function openAccountEditor(account) {
         var card = findCard(accountUIID(account));
         var editor = card && card.querySelector('[data-slot="editor"]');
-        if (!editor) {
+        if (!editor || editor.open) {
           return;
         }
-        var willExpand = editor.hidden;
-        editor.hidden = !willExpand;
-        button.setAttribute("aria-expanded", String(willExpand));
-        button.textContent = willExpand ? "收起编辑" : "编辑账号";
-        updateAccountControlLabels(card, account, getAccountIndex(accountUIID(account)), willExpand);
-        if (willExpand) {
-          expandedAccounts.add(accountUIID(account));
-          var nameInput = editor.querySelector('[data-field="name"]');
-          if (nameInput) {
-            nameInput.focus();
-          }
+        if (typeof editor.showModal === "function") {
+          editor.showModal();
         } else {
-          expandedAccounts.delete(accountUIID(account));
+          editor.setAttribute("open", "");
+        }
+        var nameInput = editor.querySelector('[data-field="name"]');
+        if (nameInput) {
+          nameInput.focus();
+        }
+      }
+
+      function closeAccountEditor(account) {
+        var card = findCard(accountUIID(account));
+        var editor = card && card.querySelector('[data-slot="editor"]');
+        if (!editor || !editor.open) {
+          return;
+        }
+        if (typeof editor.close === "function") {
+          editor.close();
+        } else {
+          editor.removeAttribute("open");
         }
       }
 
@@ -2471,7 +2514,7 @@
 
         if (field === "name") {
           card.querySelector('[data-slot="name"]').textContent = account.name.trim() || "未命名账号";
-          updateAccountControlLabels(card, account, getAccountIndex(id), !card.querySelector('[data-slot="editor"]').hidden);
+          updateAccountControlLabels(card, account, getAccountIndex(id));
         }
         if (field === "baseUrl") {
           card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
@@ -2491,7 +2534,9 @@
         }
         var action = button.dataset.action;
         if (action === "edit") {
-          toggleEditor(account, button);
+          openAccountEditor(account);
+        } else if (action === "close-editor") {
+          closeAccountEditor(account);
         } else if (action === "move-up") {
           moveAccount(account, -1, "move-up");
         } else if (action === "move-down") {
