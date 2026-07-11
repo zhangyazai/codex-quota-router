@@ -172,13 +172,52 @@ func TestStrategies(t *testing.T) {
 	}
 }
 
-func TestCodexSnippetDisablesClientRetries(t *testing.T) {
+func TestCodexSnippetContainsOnlyRequestedSettings(t *testing.T) {
 	app := newTestApplication(t, strategyPriority, time.Now)
-	snippet := app.codexSnippet()
-	for _, setting := range []string{"request_max_retries = 0", "stream_max_retries = 0"} {
-		if !strings.Contains(snippet, setting) {
-			t.Fatalf("Codex snippet missing %q", setting)
-		}
+	want := "model_provider = \"quota_router\"\n\n" +
+		"[model_providers.quota_router]\n" +
+		"name = \"quota-router\"\n" +
+		"base_url = \"http://127.0.0.1:4000/v1\"\n" +
+		"wire_api = \"responses\"\n" +
+		"experimental_bearer_token = \"gateway-token\"\n" +
+		"requires_openai_auth = true\n"
+	if got := app.codexSnippet(); got != want {
+		t.Fatalf("Codex snippet = %q, want %q", got, want)
+	}
+}
+
+func TestAdminCanRotateGatewayToken(t *testing.T) {
+	app := newTestApplication(t, strategyPriority, time.Now)
+	oldToken := app.cfg.GatewayToken
+	response := adminJSON(app, http.MethodPut, "/admin/config", saveRequest{RotateGatewayToken: true}, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK {
+		t.Fatalf("rotate token status=%d body=%s", response.Code, response.Body.String())
+	}
+	if app.cfg.GatewayToken == "" || app.cfg.GatewayToken == oldToken {
+		t.Fatalf("gateway token was not rotated: %q", app.cfg.GatewayToken)
+	}
+	newToken := app.cfg.GatewayToken
+	if !strings.Contains(response.Body.String(), newToken) {
+		t.Fatal("rotate response did not include the updated Codex snippet")
+	}
+	saved, found, err := loadConfig(app.configPath)
+	if err != nil || !found || saved.GatewayToken != newToken {
+		t.Fatalf("rotated token was not persisted: found=%v token=%q err=%v", found, saved.GatewayToken, err)
+	}
+	proxyStatus := func(token string) int {
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/v1/responses", strings.NewReader(`{}`))
+		request.Host = listenAddress
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		result := httptest.NewRecorder()
+		app.routes().ServeHTTP(result, request)
+		return result.Code
+	}
+	if status := proxyStatus(oldToken); status != http.StatusUnauthorized {
+		t.Fatalf("old gateway token status=%d, want %d", status, http.StatusUnauthorized)
+	}
+	if status := proxyStatus(newToken); status == http.StatusUnauthorized {
+		t.Fatal("new gateway token was rejected")
 	}
 }
 

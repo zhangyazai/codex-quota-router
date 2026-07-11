@@ -1007,13 +1007,15 @@
       <div class="panel-head">
         <div>
           <h2 id="codexTitle">Codex 用户级配置</h2>
-          <p>将下面内容写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
+          <p>复制后写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
         </div>
-        <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
+        <div class="toolbar">
+          <button class="secondary" id="rotateGatewayTokenButton" type="button">更换 Token</button>
+          <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
+        </div>
       </div>
       <div class="panel-body">
-        <pre id="codexSnippet" aria-label="Codex config.toml 配置内容">正在加载…</pre>
-        <p class="helper" style="margin-bottom: 0;">这是当前用户的配置文件，不需要修改系统级配置。若文件已有其他设置，请合并内容，不要整份覆盖。</p>
+        <p class="helper" style="margin-bottom: 0;">配置内容不会在页面显示。若文件已有其他设置，请合并内容，不要整份覆盖；更换 Token 后，旧 Token 会立即失效。</p>
       </div>
     </section>
   </main>
@@ -1216,8 +1218,8 @@
         balanceRefreshResult: document.getElementById("balanceRefreshResult"),
         reloadButton: document.getElementById("reloadButton"),
         saveButton: document.getElementById("saveButton"),
+        rotateGatewayTokenButton: document.getElementById("rotateGatewayTokenButton"),
         copyCodexButton: document.getElementById("copyCodexButton"),
-        codexSnippet: document.getElementById("codexSnippet"),
         httpRiskDialog: document.getElementById("httpRiskDialog"),
         httpRiskList: document.getElementById("httpRiskList")
       };
@@ -1376,6 +1378,9 @@
       function setPageBusy(busy) {
         pageBusy = busy;
         updatePageInteractivity();
+        if (!busy) {
+          elements.copyCodexButton.disabled = !pageReady || !codexSnippet;
+        }
       }
 
       function updatePersistentHTTPWarning() {
@@ -1986,7 +1991,6 @@
             : (data.codexSnippet && data.codexSnippet.snippet) || "";
           elements.strategy.value = config.strategy;
           elements.testModel.value = config.testModel;
-          elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
           renderAccounts();
           updateStrategyDescription();
           updatePersistentHTTPWarning();
@@ -2069,7 +2073,6 @@
           }
           elements.strategy.value = config.strategy;
           elements.testModel.value = config.testModel;
-          elements.codexSnippet.textContent = codexSnippet || "服务端尚未返回 Codex 配置。";
           renderAccounts();
           updateStrategyDescription();
           updatePersistentHTTPWarning();
@@ -2578,6 +2581,51 @@
         }
       }
 
+      async function rotateGatewayToken() {
+        if (!window.confirm("更换后旧 Token 会立即失效。请随后重新复制并更新 Codex 配置。确定更换吗？")) {
+          return;
+        }
+        clearGlobalError();
+        var restoreButton = setButtonBusy(elements.rotateGatewayTokenButton, "正在更换…");
+        var previousSnippet = codexSnippet;
+        var failure = "";
+        setPageBusy(true);
+        try {
+          var data = await api("/admin/config", {
+            method: "PUT",
+            body: JSON.stringify({ rotateGatewayToken: true })
+          });
+          if (typeof data.codexSnippet !== "string" || !data.codexSnippet) {
+            throw new Error("服务端未返回新的配置");
+          }
+          codexSnippet = data.codexSnippet;
+        } catch (error) {
+          try {
+            var latest = await api("/admin/codex-config");
+            var latestSnippet = latest && typeof latest.snippet === "string" ? latest.snippet : "";
+            if (!latestSnippet) {
+              throw new Error("服务端未返回当前配置");
+            }
+            codexSnippet = latestSnippet;
+            if (latestSnippet === previousSnippet) {
+              failure = "更换 Token 失败：" + error.message;
+            }
+          } catch (refreshError) {
+            codexSnippet = "";
+            failure = "无法确认 Token 是否已更换，请重新加载页面";
+          }
+        } finally {
+          setPageBusy(false);
+          restoreButton();
+        }
+        if (failure) {
+          showGlobalError(failure);
+          announce("Token 更换失败");
+        } else {
+          announce("Token 已更换，请重新复制配置");
+        }
+      }
+
       elements.strategy.addEventListener("change", function () {
         config.strategy = elements.strategy.value;
         markDirty();
@@ -2599,6 +2647,7 @@
         refreshBalances({ manual: true });
       });
       elements.saveButton.addEventListener("click", saveAll);
+      elements.rotateGatewayTokenButton.addEventListener("click", rotateGatewayToken);
       elements.copyCodexButton.addEventListener("click", copyCodexConfig);
 
       elements.reloadButton.addEventListener("click", function () {

@@ -104,10 +104,11 @@ type accountInput struct {
 }
 
 type saveRequest struct {
-	Accounts          *[]accountInput `json:"accounts"`
-	Strategy          *string         `json:"strategy"`
-	TestModel         *string         `json:"testModel"`
-	AllowInsecureHTTP *bool           `json:"allowInsecureHttp"`
+	Accounts           *[]accountInput `json:"accounts"`
+	Strategy           *string         `json:"strategy"`
+	TestModel          *string         `json:"testModel"`
+	AllowInsecureHTTP  *bool           `json:"allowInsecureHttp"`
+	RotateGatewayToken bool            `json:"rotateGatewayToken"`
 }
 
 type testRequest struct {
@@ -825,10 +826,8 @@ func (a *application) codexSnippet() string {
 		"name = \"quota-router\"\n" +
 		"base_url = \"http://127.0.0.1:4000/v1\"\n" +
 		"wire_api = \"responses\"\n" +
-		"request_max_retries = 0\n" +
-		"stream_max_retries = 0\n" +
 		"experimental_bearer_token = " + strconv.Quote(token) + "\n" +
-		"requires_openai_auth = false\n"
+		"requires_openai_auth = true\n"
 }
 
 func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
@@ -847,6 +846,15 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.AllowInsecureHTTP != nil {
 		candidate.AllowInsecureHTTP = *request.AllowInsecureHTTP
+	}
+	if request.RotateGatewayToken {
+		token, err := randomToken()
+		if err != nil {
+			a.mu.Unlock()
+			writeAdminError(w, http.StatusInternalServerError, "无法生成新的网关 Token")
+			return
+		}
+		candidate.GatewayToken = token
 	}
 	changedAccounts := make(map[string]bool)
 	if request.Accounts != nil {
