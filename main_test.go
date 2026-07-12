@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -485,6 +486,8 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 		testAccount("a", "https://first.invalid/v1", "key-a"),
 		testAccount("b", "https://second.invalid/v1", "key-b"),
 	)
+	var logs bytes.Buffer
+	app.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	app.client = &http.Client{Transport: transport}
 	response := proxyRequest(app, `{}`)
 	if response.Code != http.StatusOK || response.Body.String() != "data: partial\n\n" {
@@ -492,6 +495,12 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 	}
 	if secondCalls.Load() != 0 {
 		t.Fatalf("started stream was replayed %d time(s)", secondCalls.Load())
+	}
+	if !response.Flushed {
+		t.Fatal("stream response was not flushed")
+	}
+	if strings.Contains(logs.String(), "data: partial") || !strings.Contains(logs.String(), "terminal=upstream_read_error") {
+		t.Fatalf("unsafe or incomplete stream log: %s", logs.String())
 	}
 }
 
@@ -1539,6 +1548,180 @@ func TestCompletelyUnavailablePoolReturns503(t *testing.T) {
 	response := proxyRequest(app, `{}`)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestApplicationLogPathForPlatforms(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	runtimeRoot := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), configDirectory, configFilename)
+	for _, test := range []struct {
+		name        string
+		goos        string
+		runtimeRoot string
+		want        string
+	}{
+		{name: "linux runtime", goos: "linux", runtimeRoot: runtimeRoot,
+			want: filepath.Join(runtimeRoot, configDirectory, logFilename)},
+		{name: "linux fallback", goos: "linux", runtimeRoot: "relative",
+			want: filepath.Join(temporaryRoot, configDirectory+"-"+logReference(filepath.Clean(configPath)), logFilename)},
+		{name: "darwin", goos: "darwin",
+			want: filepath.Join(temporaryRoot, configDirectory+"-"+logReference(filepath.Clean(configPath)), logFilename)},
+		{name: "windows", goos: "windows", want: filepath.Join(filepath.Dir(configPath), logFilename)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := applicationLogPath(test.goos, temporaryRoot, test.runtimeRoot, configPath); got != test.want {
+				t.Fatalf("applicationLogPath(%s)=%q, want %q", test.goos, got, test.want)
+			}
+		})
+	}
+}
+
+func TestLogWriterKeepsOneBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), logFilename)
+	writer, err := openRotatingLogWriter(path, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(value string) {
+		t.Helper()
+		if written, writeErr := writer.Write([]byte(value)); writeErr != nil || written != len(value) {
+			t.Fatalf("write %q = %d, %v", value, written, writeErr)
+		}
+	}
+	write("first\n")
+	write("second\n")
+	write("third\n")
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".1"
+	data, err := os.ReadFile(backup)
+	if err != nil || string(data) != "second\n" {
+		t.Fatalf("backup=%q err=%v", data, err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil || string(data) != "third\n" {
+		t.Fatalf("current=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(path + ".2"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected second backup: %v", err)
+	}
+}
+
+func TestLogWriterFallsBackWhenBackupCannotBeReplaced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), logFilename)
+	writer, err := openRotatingLogWriter(path, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := strings.Repeat("a", 120)
+	if _, err := writer.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".1", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("second-line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("third\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("overflow-payload-that-must-not-be-written\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("dropped-again\n")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := string(data)
+	if !strings.Contains(logged, first) || !strings.Contains(logged, "msg=log_rotation_fallback") ||
+		!strings.Contains(logged, "second-line") || !strings.Contains(logged, "third") {
+		t.Fatalf("unexpected fallback log: %q", logged)
+	}
+	if strings.Count(logged, "msg=log_writes_suspended") != 1 ||
+		strings.Contains(logged, "overflow-payload") || strings.Contains(logged, "dropped-again") {
+		t.Fatalf("unexpected suspension log: %q", logged)
+	}
+	if err := os.Remove(path + ".1"); err != nil {
+		t.Fatal(err)
+	}
+	writer.mu.Lock()
+	writer.retryAt = time.Time{}
+	writer.mu.Unlock()
+	if _, err := writer.Write([]byte("resumed\n")); err != nil {
+		t.Fatal(err)
+	}
+	writer.mu.Lock()
+	suspended := writer.suspended
+	writer.mu.Unlock()
+	if suspended {
+		t.Fatal("log writer did not resume after rotation recovered")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil || string(data) != "resumed\n" {
+		t.Fatalf("resumed log=%q err=%v", data, err)
+	}
+	backupData, err := os.ReadFile(path + ".1")
+	if err != nil || !strings.Contains(string(backupData), "msg=log_writes_suspended") {
+		t.Fatalf("recovered backup=%q err=%v", backupData, err)
+	}
+}
+
+func TestProxyLogsDoNotContainSecrets(t *testing.T) {
+	first := testAccount("account-id-secret\nfirst", "https://first.invalid/v1", "api-secret-first")
+	first.Name = "account-name-secret"
+	first.NewAPISecret = "access-secret"
+	second := testAccount("second", "https://second.invalid/v1", "api-secret-second")
+	app := newTestApplication(t, strategyPriority, time.Now, first, second)
+	var logs bytes.Buffer
+	app.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	app.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "first.invalid" {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"code":"rate_limit_exceeded","message":"response-secret"}}`,
+				)),
+				Request: request,
+			}, nil
+		}
+		return nil, errors.New("network-secret api-secret-second query-secret")
+	})}
+	request := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1:4000/v1/responses?token=query-secret", strings.NewReader("body-secret"))
+	request.Host = listenAddress
+	request.Header.Set("Authorization", "Bearer gateway-token")
+	request.Header.Set("Cookie", "cookie-secret")
+	request.Header.Set("X-Debug", "header-secret")
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	logged := logs.String()
+	for _, secret := range []string{
+		"account-id-secret", "account-name-secret", "api-secret-first", "api-secret-second",
+		"access-secret", "gateway-token", "query-secret", "body-secret", "cookie-secret",
+		"header-secret", "response-secret", "network-secret",
+	} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("log leaked %q: %s", secret, logged)
+		}
+	}
+	if !strings.Contains(logged, "msg=proxy_request_started") ||
+		!strings.Contains(logged, "reason=rate_limit") ||
+		!strings.Contains(logged, "msg=proxy_upstream_failed") ||
+		!strings.Contains(logged, "account_ref=") {
+		t.Fatalf("diagnostic events missing: %s", logged)
 	}
 }
 

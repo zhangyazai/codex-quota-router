@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +34,9 @@ const (
 	configVersion      = 3
 	configDirectory    = "codex-quota-router"
 	configFilename     = "config.dat"
+	logFilename        = "router.log"
+	maxLogFileSize     = 10 << 20
+	logRotationRetry   = time.Minute
 	maxAdminBody       = 1 << 20
 	maxErrorBody       = 1 << 20
 	maxProxyBody       = 128 << 20
@@ -60,7 +65,10 @@ const (
 	balanceScopeTokenOnly = "token_only"
 )
 
-var errNewAPIAuthentication = errors.New("New API authentication failed")
+var (
+	errNewAPIAuthentication = errors.New("New API authentication failed")
+	errUnsafeLogPath        = errors.New("unsafe log path")
+)
 
 //go:embed web/index.html
 var indexHTML []byte
@@ -236,7 +244,9 @@ type application struct {
 	csrfToken             string
 	client                *http.Client
 	now                   func() time.Time
+	logger                *slog.Logger
 	runtime               map[string]*accountRuntime
+	requestSequence       uint64
 	roundRobinCursor      int
 	lastRoutedAccountID   string
 	lastRoutedAccountName string
@@ -244,23 +254,48 @@ type application struct {
 
 func main() {
 	if err := run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	app, err := newApplication("", nil, time.Now)
+	configPath, err := defaultConfigPath()
 	if err != nil {
 		return err
 	}
+	listener, err := net.Listen("tcp", listenAddress)
+	if err != nil {
+		appendStartupFailure(configPath, err)
+		return err
+	}
+	defer listener.Close()
+	logger, logWriter, err := openApplicationLogger(configPath)
+	if err != nil {
+		return fmt.Errorf("初始化日志失败: %w", err)
+	}
+	defer logWriter.Close()
+	logger.Info("service_starting", "version", applicationVersion, "goos", runtime.GOOS, "listen", listenAddress)
+	app, err := newApplication(configPath, nil, time.Now)
+	if err != nil {
+		logger.Error("service_start_failed", "error_kind", logErrorKind(err))
+		return err
+	}
+	app.logger = logger
 	server := &http.Server{
-		Addr:              listenAddress,
 		Handler:           app.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
-	return server.ListenAndServe()
+	logger.Info("service_ready", "accounts", len(app.cfg.Accounts), "strategy", app.cfg.Strategy)
+	err = server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) {
+		logger.Info("service_stopped", "reason", "server_closed")
+	} else {
+		logger.Error("service_stopped", "reason", "server_error", "error_kind", logErrorKind(err))
+	}
+	return err
 }
 
 func newApplication(path string, client *http.Client, now func() time.Time) (*application, error) {
@@ -351,6 +386,354 @@ func defaultConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, configDirectory, configFilename), nil
+}
+
+func applicationLogPath(goos, temporaryRoot, runtimeRoot, configPath string) string {
+	switch goos {
+	case "linux":
+		if filepath.IsAbs(runtimeRoot) {
+			return filepath.Join(runtimeRoot, configDirectory, logFilename)
+		}
+		directory := configDirectory + "-" + logReference(filepath.Clean(configPath))
+		return filepath.Join(temporaryRoot, directory, logFilename)
+	case "darwin":
+		directory := configDirectory + "-" + logReference(filepath.Clean(configPath))
+		return filepath.Join(temporaryRoot, directory, logFilename)
+	default:
+		return filepath.Join(filepath.Dir(configPath), logFilename)
+	}
+}
+
+type rotatingLogWriter struct {
+	mu                  sync.Mutex
+	path                string
+	file                *os.File
+	size                int64
+	maxSize             int64
+	closed              bool
+	retryAt             time.Time
+	suspended           bool
+	reopenAfterRotation bool
+}
+
+func openApplicationLogger(configPath string) (*slog.Logger, *rotatingLogWriter, error) {
+	logPath, err := resolveApplicationLogPath(configPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	writer, err := openRotatingLogWriter(logPath, maxLogFileSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	logger := slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return logger, writer, nil
+}
+
+func resolveApplicationLogPath(configPath string) (string, error) {
+	runtimeRoot := ""
+	if runtime.GOOS == "linux" {
+		candidate := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
+		if filepath.IsAbs(candidate) {
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				runtimeRoot = candidate
+			}
+		}
+	}
+	logPath := applicationLogPath(runtime.GOOS, os.TempDir(), runtimeRoot, configPath)
+	directory := filepath.Dir(logPath)
+	if err := ensureLogDirectory(directory); err != nil {
+		if runtime.GOOS != "linux" || runtimeRoot == "" || errors.Is(err, errUnsafeLogPath) {
+			return "", err
+		}
+		logPath = applicationLogPath(runtime.GOOS, os.TempDir(), "", configPath)
+		directory = filepath.Dir(logPath)
+		if err := ensureLogDirectory(directory); err != nil {
+			return "", err
+		}
+	}
+	return logPath, nil
+}
+
+func appendStartupFailure(configPath string, startupErr error) {
+	logPath, err := resolveApplicationLogPath(configPath)
+	if err != nil || validateLogFile(logPath) != nil {
+		return
+	}
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	if file.Chmod(0o600) != nil {
+		return
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return
+	}
+	line := fmt.Sprintf("time=%s level=ERROR msg=service_start_failed stage=listen error_kind=%s\n",
+		time.Now().UTC().Format(time.RFC3339Nano), logErrorKind(startupErr))
+	if info.Size()+int64(len(line)) > maxLogFileSize {
+		return
+	}
+	_, _ = file.WriteString(line)
+}
+
+func ensureLogDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: 日志目录不是普通目录", errUnsafeLogPath)
+	}
+	return os.Chmod(path, 0o700)
+}
+
+func openRotatingLogWriter(path string, maxSize int64) (*rotatingLogWriter, error) {
+	if err := validateLogFile(path); err != nil {
+		return nil, err
+	}
+	writer := &rotatingLogWriter{path: path, maxSize: maxSize}
+	if err := writer.openLocked(os.O_APPEND); err != nil {
+		return nil, err
+	}
+	return writer, nil
+}
+
+func validateLogFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: 日志文件不是普通文件", errUnsafeLogPath)
+	}
+	return nil
+}
+
+func (w *rotatingLogWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, os.ErrClosed
+	}
+	if w.file == nil {
+		if err := w.openLocked(os.O_APPEND); err != nil {
+			return 0, err
+		}
+		if w.reopenAfterRotation {
+			w.reopenAfterRotation = false
+			w.retryAt = time.Time{}
+			w.suspended = false
+			_ = w.writeMarkerLocked("log_writes_resumed", "reopen_recovered")
+		}
+	}
+	nextSize := w.size + int64(len(data))
+	if w.maxSize > 0 && w.size > 0 && nextSize > w.maxSize {
+		now := time.Now()
+		if w.retryAt.IsZero() || !now.Before(w.retryAt) {
+			if err := w.rotateLocked(); err != nil {
+				w.retryAt = now.Add(logRotationRetry)
+				if w.file == nil {
+					return 0, err
+				}
+			} else {
+				w.retryAt = time.Time{}
+				w.suspended = false
+			}
+		}
+	}
+	if w.maxSize > 0 && w.size+int64(len(data)) > 2*w.maxSize {
+		if !w.suspended {
+			_ = w.writeMarkerLocked("log_writes_suspended", "rotation_failed")
+			w.suspended = true
+		}
+		return len(data), nil
+	}
+	written, err := w.file.Write(data)
+	w.size += int64(written)
+	return written, err
+}
+
+func (w *rotatingLogWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
+
+func (w *rotatingLogWriter) rotateLocked() error {
+	file := w.file
+	w.file = nil
+	if err := file.Close(); err != nil {
+		if recoverErr := w.recoverLocked("close_failed"); recoverErr != nil {
+			return recoverErr
+		}
+		return err
+	}
+	if err := replaceFile(w.path, w.path+".1"); err != nil {
+		if recoverErr := w.recoverLocked("replace_failed"); recoverErr != nil {
+			return recoverErr
+		}
+		return err
+	}
+	w.reopenAfterRotation = true
+	if err := w.openLocked(os.O_APPEND); err != nil {
+		return err
+	}
+	w.reopenAfterRotation = false
+	return nil
+}
+
+func (w *rotatingLogWriter) openLocked(flag int) error {
+	file, err := os.OpenFile(w.path, flag|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return err
+	}
+	w.file = file
+	w.size = info.Size()
+	return nil
+}
+
+func (w *rotatingLogWriter) recoverLocked(reason string) error {
+	if err := w.openLocked(os.O_APPEND); err != nil {
+		return err
+	}
+	if w.suspended {
+		return nil
+	}
+	return w.writeMarkerLocked("log_rotation_fallback", reason)
+}
+
+func (w *rotatingLogWriter) writeMarkerLocked(event, reason string) error {
+	marker := fmt.Sprintf("time=%s level=WARN msg=%s reason=%s\n",
+		time.Now().UTC().Format(time.RFC3339Nano), event, reason)
+	written, err := w.file.WriteString(marker)
+	w.size += int64(written)
+	return err
+}
+
+func (a *application) logEvent(ctx context.Context, level slog.Level, event string, attributes ...any) {
+	if a.logger == nil {
+		return
+	}
+	a.logger.Log(ctx, level, event, attributes...)
+}
+
+func logReference(value string) string {
+	if value == "" {
+		return "none"
+	}
+	digest := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(digest[:6])
+}
+
+func proxyRouteKind(path string) string {
+	path = strings.TrimPrefix(path, "/v1")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		return "root"
+	}
+	segment, _, _ := strings.Cut(path, "/")
+	switch segment {
+	case "responses", "chat", "models":
+		return segment
+	default:
+		return "other"
+	}
+}
+
+func logErrorKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "unexpected_eof"
+	}
+	if os.IsPermission(err) {
+		return "permission"
+	}
+	if os.IsNotExist(err) {
+		return "not_found"
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return "dns"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return "timeout"
+	}
+	var operationError *net.OpError
+	if errors.As(err, &operationError) {
+		if operationError.Op == "listen" {
+			return "listen"
+		}
+		if operationError.Op == "dial" {
+			return "connect"
+		}
+		return "network"
+	}
+	return "other"
+}
+
+func upstreamOperationForLog(target string) string {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return "invalid_url"
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/api/usage/token"):
+		return "balance_token"
+	case strings.HasSuffix(path, "/api/status"):
+		return "status"
+	case strings.HasSuffix(path, "/api/user/login"):
+		return "account_login"
+	case strings.HasSuffix(path, "/api/user/self"):
+		return "account_balance"
+	case strings.HasSuffix(path, "/dashboard/billing/subscription"):
+		return "billing_subscription"
+	case strings.HasSuffix(path, "/dashboard/billing/usage"):
+		return "billing_usage"
+	default:
+		return "upstream_json"
+	}
+}
+
+func upstreamReferenceForLog(target string) string {
+	origin, ok := normalizedOrigin(target)
+	if !ok {
+		return "invalid"
+	}
+	return logReference(origin)
 }
 
 func randomToken() (string, error) {
@@ -1127,6 +1510,10 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := saveConfig(a.configPath, candidate); err != nil {
 		a.mu.Unlock()
+		a.logEvent(r.Context(), slog.LevelError, "config_save_failed",
+			"error_kind", logErrorKind(err), "accounts", len(candidate.Accounts),
+			"changed_accounts", len(changedAccounts), "strategy", candidate.Strategy,
+			"gateway_token_rotated", request.RotateGatewayToken)
 		writeAdminError(w, http.StatusInternalServerError, "配置保存失败")
 		return
 	}
@@ -1160,6 +1547,9 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.Unlock()
+	a.logEvent(r.Context(), slog.LevelInfo, "config_saved",
+		"accounts", len(candidate.Accounts), "changed_accounts", len(changedAccounts),
+		"strategy", candidate.Strategy, "gateway_token_rotated", request.RotateGatewayToken)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "config": a.publicConfig(), "status": a.status(), "codexSnippet": a.codexSnippet(),
 	})
@@ -1250,6 +1640,8 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "请先填写测试模型")
 		return
 	}
+	accountRef := logReference(candidate.ID)
+	logStarted := time.Now()
 	matchesSaved := savedFound && sameAccountRevision(saved, candidate)
 	ctx, cancel := context.WithTimeout(r.Context(), upstreamTestTime)
 	defer cancel()
@@ -1258,12 +1650,18 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	})
 	target, err := joinUpstreamURL(candidate.BaseURL, "/v1/responses", "")
 	if err != nil {
+		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
+			"account_ref", accountRef, "result", "invalid_url", "error_kind", logErrorKind(err),
+			"duration_ms", time.Since(logStarted).Milliseconds())
 		writeAdminError(w, http.StatusBadRequest, "账号 URL 无效")
 		return
 	}
 	started := a.now()
 	upstreamRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
+		a.logEvent(r.Context(), slog.LevelError, "account_test_finished",
+			"account_ref", accountRef, "result", "request_creation_failed", "error_kind", logErrorKind(err),
+			"duration_ms", time.Since(logStarted).Milliseconds())
 		writeAdminError(w, http.StatusInternalServerError, "无法创建测试请求")
 		return
 	}
@@ -1273,6 +1671,9 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	response, err := a.client.Do(upstreamRequest)
 	latency := a.now().Sub(started).Milliseconds()
 	if err != nil {
+		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
+			"account_ref", accountRef, "result", "upstream_error", "status", 0,
+			"error_kind", logErrorKind(err), "latency_ms", latency)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"ok": false, "statusCode": 0, "latencyMs": latency, "message": "无法连接到上游",
 		})
@@ -1300,6 +1701,16 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 			a.applyBalance(saved, balance)
 		}
 	}
+	result := "failed"
+	level := slog.LevelWarn
+	if ok {
+		result = "ok"
+		level = slog.LevelInfo
+	}
+	a.logEvent(r.Context(), level, "account_test_finished",
+		"account_ref", accountRef, "result", result, "status", response.StatusCode,
+		"latency_ms", latency, "balance_status", balance.Status,
+		"duration_ms", time.Since(logStarted).Milliseconds())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": ok, "statusCode": response.StatusCode, "latencyMs": latency, "message": message,
 		"balance": publicBalanceAt(balance, a.now()),
@@ -1338,6 +1749,8 @@ func (a *application) handleAccountReset(w http.ResponseWriter, r *http.Request)
 	candidate.LastSwitchAt = a.now().UTC().Format(time.RFC3339)
 	if err := saveConfig(a.configPath, candidate); err != nil {
 		a.mu.Unlock()
+		a.logEvent(r.Context(), slog.LevelError, "account_reset_failed",
+			"account_ref", logReference(request.ID), "error_kind", logErrorKind(err))
 		writeAdminError(w, http.StatusInternalServerError, "账号状态保存失败")
 		return
 	}
@@ -1345,6 +1758,7 @@ func (a *application) handleAccountReset(w http.ResponseWriter, r *http.Request)
 	runtime := a.runtimeForLocked(candidate.Accounts[index])
 	runtime.CooldownUntil = time.Time{}
 	a.mu.Unlock()
+	a.logEvent(r.Context(), slog.LevelInfo, "account_reset", "account_ref", logReference(request.ID))
 	a.refreshBalances(r.Context(), map[string]bool{request.ID: true}, 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": a.publicConfig(), "status": a.status()})
 }
@@ -1365,14 +1779,27 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, destination any) err
 }
 
 func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	a.mu.Lock()
+	a.requestSequence++
+	requestID := a.requestSequence
 	gatewayToken := a.cfg.GatewayToken
 	a.mu.Unlock()
+	routeKind := proxyRouteKind(r.URL.Path)
+	a.logEvent(r.Context(), slog.LevelInfo, "proxy_request_started",
+		"request_id", requestID, "method", r.Method, "route", routeKind,
+		"content_length", r.ContentLength, "query_present", r.URL.RawQuery != "")
 	if !requestHasGatewayToken(r, gatewayToken) {
+		a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
+			"request_id", requestID, "status", http.StatusUnauthorized, "reason", "invalid_gateway_token",
+			"duration_ms", time.Since(started).Milliseconds())
 		writeProxyError(w, http.StatusUnauthorized, "invalid_gateway_token", "本地网关 Token 无效")
 		return
 	}
 	if r.ContentLength > maxProxyBody {
+		a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
+			"request_id", requestID, "status", http.StatusRequestEntityTooLarge, "reason", "request_body_too_large",
+			"duration_ms", time.Since(started).Milliseconds())
 		writeProxyError(w, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过 128 MiB 限制")
 		return
 	}
@@ -1381,69 +1808,113 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
+			a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
+				"request_id", requestID, "status", http.StatusRequestEntityTooLarge, "reason", "request_body_too_large",
+				"duration_ms", time.Since(started).Milliseconds())
 			writeProxyError(w, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过 128 MiB 限制")
 			return
 		}
+		a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
+			"request_id", requestID, "status", http.StatusBadRequest, "reason", "invalid_request_body",
+			"error_kind", logErrorKind(err), "duration_ms", time.Since(started).Milliseconds())
 		writeProxyError(w, http.StatusBadRequest, "invalid_request_body", "无法读取请求体")
 		return
 	}
 	attempted := make(map[string]bool)
 	var previous *http.Response
+	previousAccountRef := "none"
+	previousAttempt := 0
 	for {
 		account, ok := a.selectAccount(r.Context(), attempted)
 		if !ok {
 			if previous != nil {
 				defer previous.Body.Close()
-				forwardResponse(w, previous)
+				a.logEvent(r.Context(), slog.LevelWarn, "proxy_no_candidate",
+					"request_id", requestID, "attempts", len(attempted), "last_status", previous.StatusCode)
+				a.forwardResponse(w, previous, requestID, previousAccountRef, previousAttempt, started)
 				return
 			}
+			a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
+				"request_id", requestID, "status", http.StatusServiceUnavailable, "reason", "no_available_account",
+				"attempts", len(attempted), "duration_ms", time.Since(started).Milliseconds())
 			writeProxyError(w, http.StatusServiceUnavailable, "upstream_not_available", "没有可用账号")
 			return
 		}
+		attempt := len(attempted) + 1
+		accountRef := logReference(account.ID)
 		attempted[account.ID] = true
 		if previous != nil {
 			previous.Body.Close()
 			previous = nil
 		}
+		attemptStarted := time.Now()
 		response, sendErr := a.sendUpstream(r.Context(), r, body, account)
 		if sendErr != nil {
+			a.logEvent(r.Context(), slog.LevelError, "proxy_upstream_failed",
+				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+				"status", http.StatusBadGateway, "request_bytes", len(body), "error_kind", logErrorKind(sendErr),
+				"latency_ms", time.Since(attemptStarted).Milliseconds(), "duration_ms", time.Since(started).Milliseconds())
 			writeProxyError(w, http.StatusBadGateway, "upstream_unavailable", "无法连接到上游账号")
 			return
 		}
+		stream := strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
+		responseLevel := slog.LevelInfo
+		if response.StatusCode >= 400 {
+			responseLevel = slog.LevelWarn
+		}
+		a.logEvent(r.Context(), responseLevel, "proxy_upstream_response",
+			"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+			"status", response.StatusCode, "stream", stream, "request_bytes", len(body),
+			"latency_ms", time.Since(attemptStarted).Milliseconds())
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			a.markAccountVerified(account)
 			defer response.Body.Close()
-			forwardResponse(w, response)
+			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
 			return
 		}
 		if response.StatusCode >= 500 {
 			defer response.Body.Close()
-			forwardResponse(w, response)
+			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
 			return
 		}
 		retry := false
 		if response.StatusCode == http.StatusUnauthorized {
-			a.handleAccountUnauthorized(account)
+			action := a.handleAccountUnauthorized(account)
+			a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
+				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+				"reason", "unauthorized", "action", action)
 			retry = true
 		} else {
 			classification, inspectErr := inspectErrorResponse(response)
-			if inspectErr == nil {
+			if inspectErr != nil {
+				a.logEvent(r.Context(), slog.LevelWarn, "proxy_response_inspection_failed",
+					"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+					"error_kind", logErrorKind(inspectErr))
+			} else {
 				switch classification {
 				case "quota":
-					a.blockAccount(account, "quota")
+					action := a.blockAccount(account, "quota")
+					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
+						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+						"reason", "quota", "action", action)
 					retry = true
 				case "rate_limit":
-					a.cooldownAccount(account)
+					action := a.cooldownAccount(account)
+					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
+						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+						"reason", "rate_limit", "action", action)
 					retry = true
 				}
 			}
 		}
 		if !retry {
 			defer response.Body.Close()
-			forwardResponse(w, response)
+			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
 			return
 		}
 		previous = response
+		previousAccountRef = accountRef
+		previousAttempt = attempt
 	}
 }
 
@@ -1592,33 +2063,38 @@ func (a *application) setAccountVerified(expected accountConfig, clearBlocked bo
 	if clearBlocked {
 		candidate.Accounts[index].BlockedReason = ""
 	}
-	if saveConfig(a.configPath, candidate) == nil {
+	if err := saveConfig(a.configPath, candidate); err == nil {
 		a.cfg = candidate
+	} else {
+		a.logEvent(context.Background(), slog.LevelError, "account_state_persist_failed",
+			"account_ref", logReference(expected.ID), "state", "verified", "error_kind", logErrorKind(err))
 	}
 }
 
-func (a *application) handleAccountUnauthorized(expected accountConfig) {
+func (a *application) handleAccountUnauthorized(expected accountConfig) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
 	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
-		return
+		return "stale"
 	}
 	if !a.cfg.Accounts[index].Verified {
 		a.runtimeForLocked(a.cfg.Accounts[index]).CooldownUntil = a.now().Add(accountCooldown)
-		return
+		return "cooldown"
 	}
 	a.blockAccountLocked(index, "unauthorized")
+	return "blocked"
 }
 
-func (a *application) blockAccount(expected accountConfig, reason string) {
+func (a *application) blockAccount(expected accountConfig, reason string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
 	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
-		return
+		return "stale"
 	}
 	a.blockAccountLocked(index, reason)
+	return "blocked"
 }
 
 func (a *application) blockAccountLocked(index int, reason string) {
@@ -1627,25 +2103,29 @@ func (a *application) blockAccountLocked(index int, reason string) {
 	candidate.Accounts[index].BlockedReason = reason
 	candidate.LastSwitchReason = "account_" + reason
 	candidate.LastSwitchAt = now.UTC().Format(time.RFC3339)
-	if saveConfig(a.configPath, candidate) == nil {
+	if err := saveConfig(a.configPath, candidate); err == nil {
 		a.cfg = candidate
 	} else {
 		a.cfg.Accounts[index].BlockedReason = reason
 		a.cfg.LastSwitchReason = candidate.LastSwitchReason
 		a.cfg.LastSwitchAt = candidate.LastSwitchAt
+		a.logEvent(context.Background(), slog.LevelError, "account_state_persist_failed",
+			"account_ref", logReference(candidate.Accounts[index].ID), "state", "blocked",
+			"reason", reason, "error_kind", logErrorKind(err))
 	}
 	a.runtimeForLocked(a.cfg.Accounts[index]).CooldownUntil = time.Time{}
 }
 
-func (a *application) cooldownAccount(expected accountConfig) {
+func (a *application) cooldownAccount(expected accountConfig) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
 	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
-		return
+		return "stale"
 	}
 	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
 	runtime.CooldownUntil = a.now().Add(accountCooldown)
+	return "cooldown"
 }
 
 func sameAccountRevision(current, expected accountConfig) bool {
@@ -1784,8 +2264,22 @@ func newBalanceRefreshContext(parent context.Context) (context.Context, context.
 func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, maxAge time.Duration) {
 	a.balanceRefreshMu.Lock()
 	defer a.balanceRefreshMu.Unlock()
+	started := time.Now()
 	ctx, cancel := newBalanceRefreshContext(ctx)
 	defer cancel()
+	accountCount := 0
+	defer func() {
+		result := "ok"
+		level := slog.LevelInfo
+		if ctx.Err() != nil {
+			result = "interrupted"
+			level = slog.LevelWarn
+		}
+		a.logEvent(context.Background(), level, "balance_refresh_finished",
+			"accounts", accountCount, "automatic", maxAge > 0, "filtered", ids != nil,
+			"result", result, "error_kind", logErrorKind(ctx.Err()),
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 	a.mu.Lock()
 	now := a.now()
 	accounts := make([]accountConfig, 0, len(a.cfg.Accounts))
@@ -1807,6 +2301,7 @@ func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, 
 	if maxAge > 0 {
 		sortAccountsByBalanceAge(accounts, updatedAt)
 	}
+	accountCount = len(accounts)
 	workerCount := balanceWorkers
 	if len(accounts) < workerCount {
 		workerCount = len(accounts)
@@ -1849,9 +2344,24 @@ func sortAccountsByBalanceAge(accounts []accountConfig, updatedAt map[string]tim
 	})
 }
 
-func (a *application) probeBalance(ctx context.Context, account accountConfig) balanceSnapshot {
+func (a *application) probeBalance(ctx context.Context, account accountConfig) (result balanceSnapshot) {
+	started := time.Now()
+	defer func() {
+		status := result.Status
+		if status == "" {
+			status = "unknown"
+		}
+		level := slog.LevelInfo
+		if status == "error" || status == "auth_error" {
+			level = slog.LevelWarn
+		}
+		a.logEvent(context.Background(), level, "balance_probe_finished",
+			"account_ref", logReference(account.ID), "status", status,
+			"scope", result.Scope, "limited_by", result.LimitedBy,
+			"context_error", logErrorKind(ctx.Err()), "duration_ms", time.Since(started).Milliseconds())
+	}()
 	checkedAt := a.now()
-	result := balanceSnapshot{Status: "error", UpdatedAt: checkedAt}
+	result = balanceSnapshot{Status: "error", UpdatedAt: checkedAt}
 	usageURL, err := balanceAPIURL(account.BaseURL, "/api/usage/token/")
 	if err != nil {
 		return result
@@ -2256,8 +2766,15 @@ func (a *application) getUpstreamJSON(ctx context.Context, target, apiKey string
 }
 
 func (a *application) requestUpstreamJSON(ctx context.Context, method, target string, body []byte, headers http.Header) (int, []byte, []*http.Cookie, error) {
+	started := time.Now()
+	operation := upstreamOperationForLog(target)
+	upstreamRef := upstreamReferenceForLog(target)
 	request, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
+		a.logEvent(context.Background(), slog.LevelWarn, "upstream_json_finished",
+			"operation", operation, "upstream_ref", upstreamRef, "status", 0,
+			"result", "request_creation_failed", "error_kind", logErrorKind(err),
+			"duration_ms", time.Since(started).Milliseconds())
 		return 0, nil, nil, err
 	}
 	request.Header.Set("Accept", "application/json")
@@ -2267,11 +2784,19 @@ func (a *application) requestUpstreamJSON(ctx context.Context, method, target st
 	copyHeaders(request.Header, headers)
 	response, err := a.client.Do(request)
 	if err != nil {
+		a.logEvent(context.Background(), slog.LevelWarn, "upstream_json_finished",
+			"operation", operation, "upstream_ref", upstreamRef, "status", 0,
+			"result", "network_error", "error_kind", logErrorKind(err),
+			"duration_ms", time.Since(started).Milliseconds())
 		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody+1))
 	if err != nil || len(responseBody) > maxErrorBody {
+		a.logEvent(context.Background(), slog.LevelWarn, "upstream_json_finished",
+			"operation", operation, "upstream_ref", upstreamRef, "status", response.StatusCode,
+			"result", "invalid_response", "error_kind", logErrorKind(err),
+			"duration_ms", time.Since(started).Milliseconds())
 		return response.StatusCode, nil, nil, errors.New("invalid balance response")
 	}
 	return response.StatusCode, responseBody, response.Cookies(), nil
@@ -2474,15 +2999,45 @@ func redactSecrets(message string, secrets ...string) string {
 	return message
 }
 
-func forwardResponse(w http.ResponseWriter, response *http.Response) {
+func (a *application) forwardResponse(
+	w http.ResponseWriter,
+	response *http.Response,
+	requestID uint64,
+	accountRef string,
+	attempt int,
+	started time.Time,
+) {
 	copyHeaders(w.Header(), response.Header)
 	removeHopHeaders(w.Header())
 	w.WriteHeader(response.StatusCode)
 	buffer := make([]byte, 32<<10)
+	written := int64(0)
+	terminal := "eof"
+	errorKind := "none"
+	stream := strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
+	defer func() {
+		level := slog.LevelInfo
+		if terminal != "eof" {
+			level = slog.LevelWarn
+		}
+		a.logEvent(context.Background(), level, "proxy_response_finished",
+			"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+			"status", response.StatusCode, "stream", stream, "bytes", written,
+			"terminal", terminal, "error_kind", errorKind,
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 	for {
 		count, readErr := response.Body.Read(buffer)
 		if count > 0 {
-			if _, writeErr := w.Write(buffer[:count]); writeErr != nil {
+			writeCount, writeErr := w.Write(buffer[:count])
+			written += int64(writeCount)
+			if writeErr != nil || writeCount != count {
+				terminal = "downstream_write_error"
+				if writeErr != nil {
+					errorKind = logErrorKind(writeErr)
+				} else {
+					errorKind = "short_write"
+				}
 				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
@@ -2490,6 +3045,10 @@ func forwardResponse(w http.ResponseWriter, response *http.Response) {
 			}
 		}
 		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				terminal = "upstream_read_error"
+				errorKind = logErrorKind(readErr)
+			}
 			break
 		}
 	}
