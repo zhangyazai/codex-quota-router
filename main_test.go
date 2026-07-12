@@ -746,12 +746,15 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		hardLimit     string
+		statusBody    string
 		wantAmount    float64
+		wantUnit      string
 		wantUnlimited bool
 		wantScope     string
 	}{
-		{name: "unlimited token is capped by compatible user bill", hardLimit: "6", wantAmount: 5, wantScope: balanceScopeActual},
-		{name: "unlimited token sentinel stays unverified", hardLimit: "100000000", wantUnlimited: true, wantScope: balanceScopeTokenOnly},
+		{name: "unlimited token is capped by compatible user bill", hardLimit: "6", statusBody: `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`, wantAmount: 5, wantUnit: "USD", wantScope: balanceScopeActual},
+		{name: "dashboard USD converts to CNY before limiting", hardLimit: "6", statusBody: `{"data":{"quota_per_unit":500000,"quota_display_type":"CNY","usd_exchange_rate":7}}`, wantAmount: 35, wantUnit: "CNY", wantScope: balanceScopeActual},
+		{name: "unlimited token sentinel stays unverified", hardLimit: "100000000", statusBody: `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`, wantUnit: "USD", wantUnlimited: true, wantScope: balanceScopeTokenOnly},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -760,7 +763,7 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 				case "/api/usage/token/":
 					_, _ = io.WriteString(w, `{"data":{"unlimited_quota":true}}`)
 				case "/api/status":
-					_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+					_, _ = io.WriteString(w, test.statusBody)
 				case "/v1/dashboard/billing/subscription":
 					_, _ = io.WriteString(w, `{"hard_limit_usd":`+test.hardLimit+`}`)
 				case "/v1/dashboard/billing/usage":
@@ -774,7 +777,7 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 				testAccount("a", server.URL+"/v1", "balance-key"),
 			)
 			balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
-			if balance.Status != "ok" || balance.Amount != test.wantAmount || balance.Unlimited != test.wantUnlimited ||
+			if balance.Status != "ok" || balance.Amount != test.wantAmount || balance.Unit != test.wantUnit || balance.Unlimited != test.wantUnlimited ||
 				balance.Scope != test.wantScope {
 				t.Fatalf("unexpected compatible unlimited balance: %#v", balance)
 			}
@@ -838,6 +841,34 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 		}
 	})
 
+	t.Run("dashboard raw quota is not treated as USD", func(t *testing.T) {
+		var usageCalls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/usage/token/":
+				http.NotFound(w, r)
+			case "/v1/dashboard/billing/subscription":
+				_, _ = io.WriteString(w, `{"total_available":1000000}`)
+			case "/v1/dashboard/billing/usage":
+				usageCalls.Add(1)
+				_, _ = io.WriteString(w, `{"total_usage":0}`)
+			case "/api/status":
+				_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"CNY","usd_exchange_rate":7}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		app := newTestApplication(t, strategyPriority, time.Now,
+			testAccount("a", server.URL+"/v1", "balance-key"),
+		)
+		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+		if balance.Status == "ok" || balance.Amount != 0 || balance.Unit != "" || usageCalls.Load() != 0 {
+			t.Fatalf("raw dashboard quota was exposed as money: %#v usageCalls=%d", balance, usageCalls.Load())
+		}
+	})
+
 	for name, usageBody := range map[string]string{
 		"non JSON usage":  "not-json",
 		"unmatched usage": `{"data":{"unexpected":1}}`,
@@ -884,8 +915,9 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 			testAccount("a", server.URL+"/v1", "balance-key"),
 		)
 		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
-		if balance.Status != "ok" || balance.Unit != "" {
-			t.Fatalf("unknown unit became comparable: %#v", balance)
+		if balance.Status != balanceRefreshError || balance.Unit != "" || balance.Amount != 0 ||
+			balance.ErrorStage != balanceStageQuotaMetadata {
+			t.Fatalf("unknown unit was exposed as a readable balance: %#v", balance)
 		}
 	})
 
@@ -904,8 +936,9 @@ func TestBalanceProbeNewAPIAndDashboardCompatibility(t *testing.T) {
 		}
 		statusCode = http.StatusUnauthorized
 		balance = app.probeBalance(context.Background(), app.cfg.Accounts[0])
-		if balance.Status != "error" {
-			t.Fatalf("401 status=%q, want error", balance.Status)
+		if balance.Status != "auth_error" || balance.ErrorStage != balanceStageTokenUsage ||
+			balance.ErrorCode != balanceErrorAPIKeyAuth {
+			t.Fatalf("401 balance=%#v, want structured auth failure", balance)
 		}
 	})
 }
@@ -997,6 +1030,38 @@ func TestNewAPIAccessTokenUsesActualAccountQuota(t *testing.T) {
 		if balance.Status != "ok" || balance.Amount != 5 || balance.Unit != "USD" || balance.Unlimited ||
 			balance.Scope != balanceScopeActual || balance.LimitedBy != "account" {
 			t.Fatalf("dashboard fallback did not use actual account quota: %#v", balance)
+		}
+	})
+
+	t.Run("dashboard USD is converted before account comparison", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/usage/token/":
+				http.NotFound(w, r)
+			case "/v1/dashboard/billing/subscription":
+				_, _ = io.WriteString(w, `{"hard_limit_usd":10}`)
+			case "/v1/dashboard/billing/usage":
+				_, _ = io.WriteString(w, `{"total_usage":0}`)
+			case "/api/status":
+				_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"CNY","usd_exchange_rate":7}}`)
+			case "/api/user/self":
+				_, _ = io.WriteString(w, `{"success":true,"data":{"quota":50000000}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		account := testAccount("a", server.URL+"/v1", "model-key")
+		account.NewAPIAuthMode = newAPIAuthAccessToken
+		account.NewAPIUserID = 42
+		account.NewAPISecret = "access-token"
+		app := newTestApplication(t, strategyPriority, time.Now, account)
+		balance := app.probeBalance(context.Background(), app.cfg.Accounts[0])
+		if balance.Status != "ok" || balance.Amount != 70 || balance.Unit != "CNY" || balance.Unlimited ||
+			balance.Scope != balanceScopeActual || balance.LimitedBy != "token" {
+			t.Fatalf("dashboard USD was not converted before comparison: %#v", balance)
 		}
 	})
 }
@@ -1362,7 +1427,7 @@ func TestBalanceRefreshHasConcurrencyLimit(t *testing.T) {
 	app := newTestApplication(t, strategyPriority, time.Now, accounts...)
 	var active atomic.Int32
 	var maximum atomic.Int32
-	entered := make(chan struct{}, len(accounts)*4)
+	entered := make(chan struct{}, len(accounts)*balanceProbeParallelism*2)
 	release := make(chan struct{})
 	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		current := active.Add(1)
@@ -1387,16 +1452,17 @@ func TestBalanceRefreshHasConcurrencyLimit(t *testing.T) {
 			done <- struct{}{}
 		}()
 	}
-	for index := 0; index < balanceWorkers; index++ {
+	initialParallelRequests := balanceWorkers * 2
+	for index := 0; index < initialParallelRequests; index++ {
 		select {
 		case <-entered:
 		case <-time.After(time.Second):
-			t.Fatal("balance workers did not start")
+			t.Fatal("parallel balance stages did not start")
 		}
 	}
 	select {
 	case <-entered:
-		t.Fatal("balance refresh exceeded worker limit")
+		t.Fatal("balance refresh started another account before a worker was free")
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
@@ -1407,12 +1473,529 @@ func TestBalanceRefreshHasConcurrencyLimit(t *testing.T) {
 			t.Fatal("balance refresh did not finish")
 		}
 	}
-	if maximum.Load() > balanceWorkers {
-		t.Fatalf("maximum balance concurrency=%d, want <=%d", maximum.Load(), balanceWorkers)
+	if maximum.Load() > balanceWorkers*balanceProbeParallelism {
+		t.Fatalf("maximum balance concurrency=%d, want <=%d", maximum.Load(), balanceWorkers*balanceProbeParallelism)
+	}
+}
+
+func TestNewAPIAccessTokenBalanceStagesRunInParallel(t *testing.T) {
+	entered := make(chan string, balanceProbeParallelism)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- r.URL.Path
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":0,"unlimited_quota":true}}`)
+		case "/api/user/self":
+			_, _ = io.WriteString(w, `{"success":true,"data":{"quota":2500000}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-key")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 42
+	account.NewAPISecret = "access-token"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	result := make(chan balanceSnapshot, 1)
+	go func() { result <- app.probeBalance(context.Background(), account) }()
+
+	seen := make(map[string]bool)
+	for len(seen) < balanceProbeParallelism {
+		select {
+		case path := <-entered:
+			seen[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("balance stages did not start in parallel: %#v", seen)
+		}
+	}
+	releaseAll()
+	select {
+	case balance := <-result:
+		if balance.Status != "ok" || balance.RefreshStatus != balanceRefreshOK || balance.Amount != 5 ||
+			balance.Scope != balanceScopeActual || balance.LimitedBy != "account" {
+			t.Fatalf("parallel balance=%#v", balance)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parallel balance probe did not finish")
+	}
+}
+
+func TestTokenUsageSuccessFalseIsAPIKeyAuthenticationFailure(t *testing.T) {
+	var dashboardCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"success":false,"message":"invalid token"}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		case "/dashboard/billing/subscription", "/dashboard/billing/usage":
+			dashboardCalls.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "bad-model-key")
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	balance := app.probeBalance(context.Background(), account)
+	if balance.Status != balanceRefreshAuthError || balance.ErrorStage != balanceStageTokenUsage ||
+		balance.ErrorCode != balanceErrorAPIKeyAuth || dashboardCalls.Load() != 0 {
+		t.Fatalf("token authentication failure=%#v dashboardCalls=%d", balance, dashboardCalls.Load())
+	}
+}
+
+func TestAccountOnlyPartialUsesDisplayConversion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			http.Error(w, "temporary", http.StatusServiceUnavailable)
+		case "/api/user/self":
+			_, _ = io.WriteString(w, `{"success":true,"data":{"quota":2500000}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-key")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 42
+	account.NewAPISecret = "access-token"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	balance := app.probeBalance(context.Background(), account)
+	if balance.Status != "ok" || balance.RefreshStatus != balanceRefreshPartial ||
+		balance.Scope != balanceScopeAccountOnly || balance.Amount != 5 || balance.Unit != "USD" {
+		t.Fatalf("account-only partial was not converted safely: %#v", balance)
+	}
+}
+
+func TestMetadataFailureDoesNotExposeRawQuotaAsMoney(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":0,"unlimited_quota":true}}`)
+		case "/api/user/self":
+			_, _ = io.WriteString(w, `{"success":true,"data":{"quota":395732745}}`)
+		case "/api/status":
+			http.Error(w, "temporary", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-key")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 131
+	account.NewAPISecret = "access-token"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	balance := app.probeBalance(context.Background(), account)
+	if balance.Status != balanceRefreshError || balance.ErrorStage != balanceStageQuotaMetadata ||
+		balance.Amount != 0 || !balance.UpdatedAt.IsZero() {
+		t.Fatalf("raw New API quota was exposed without conversion metadata: %#v", balance)
+	}
+}
+
+func TestInvalidMetadataDoesNotExposeRawQuotaAsMoney(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":1000000}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_display_type":"USD"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-key")
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	balance := app.probeBalance(context.Background(), account)
+	if balance.Status != balanceRefreshError || balance.ErrorStage != balanceStageQuotaMetadata ||
+		balance.Amount != 0 || !balance.UpdatedAt.IsZero() {
+		t.Fatalf("raw quota was exposed after metadata conversion failed: %#v", balance)
+	}
+}
+
+func TestBalanceRefreshUsesIndependentAccountTimeouts(t *testing.T) {
+	slow := testAccount("slow", "https://slow.invalid/v1", "slow-key")
+	fast := testAccount("fast", "https://fast.invalid/v1", "fast-key")
+	app := newTestApplication(t, strategyPriority, time.Now, slow, fast)
+	app.balanceTimeout = 40 * time.Millisecond
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "slow.invalid" {
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		body := `{"data":{"total_available":1000000}}`
+		if r.URL.Path == "/api/status" {
+			body = `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(body)), Request: r,
+		}, nil
+	})}
+	reports := app.refreshBalances(context.Background(), nil, 0)
+	if len(reports) != 2 {
+		t.Fatalf("reports=%#v", reports)
+	}
+	if app.runtime["fast"].Balance.Status != "ok" || app.runtime["fast"].Balance.Amount != 2 {
+		t.Fatalf("fast account lost to slow timeout: %#v", app.runtime["fast"].Balance)
+	}
+	if app.runtime["slow"].Balance.RefreshStatus != balanceRefreshError ||
+		app.runtime["slow"].Balance.ErrorCode != balanceErrorTimeout || !app.runtime["slow"].Balance.Retryable {
+		t.Fatalf("slow timeout was not classified safely: %#v", app.runtime["slow"].Balance)
+	}
+}
+
+func TestBalanceRefreshCanTargetRetryAccounts(t *testing.T) {
+	first := testAccount("a", "https://a.invalid/v1", "key-a")
+	second := testAccount("b", "https://b.invalid/v1", "key-b")
+	app := newTestApplication(t, strategyPriority, time.Now, first, second)
+	var firstUsage atomic.Int32
+	var secondUsage atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/usage/token/" {
+			if r.URL.Host == "a.invalid" {
+				firstUsage.Add(1)
+			} else if r.URL.Host == "b.invalid" {
+				secondUsage.Add(1)
+			}
+		}
+		body := `{"data":{"total_available":1000000}}`
+		if r.URL.Path == "/api/status" {
+			body = `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(body)), Request: r,
+		}, nil
+	})}
+	response := adminJSON(app, http.MethodPost, "/admin/balances/refresh", balanceRefreshRequest{
+		AccountIDs: []string{"a"},
+	}, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || firstUsage.Load() != 1 || secondUsage.Load() != 0 ||
+		!strings.Contains(response.Body.String(), `"accountId":"a"`) ||
+		strings.Contains(response.Body.String(), `"accountId":"b"`) {
+		t.Fatalf("targeted refresh status=%d first=%d second=%d body=%s",
+			response.Code, firstUsage.Load(), secondUsage.Load(), response.Body.String())
+	}
+}
+
+func TestBalanceAttemptPreservesLastGoodAndInvalidatesOnAuthFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	previous := balanceSnapshot{
+		Status: "ok", Amount: 7, Unit: "USD", Scope: balanceScopeActual, LimitedBy: "account",
+		UpdatedAt: now, CheckedAt: now, RefreshStatus: balanceRefreshOK,
+	}
+	transient := balanceAttemptFromFailure(now.Add(time.Second), balanceFailure{
+		Status: balanceRefreshError, Stage: balanceStageAccountQuota, Code: balanceErrorUpstream, Retryable: true,
+	})
+	merged := mergeBalanceAttempt(previous, transient)
+	if merged.Status != "ok" || merged.Amount != 7 || merged.UpdatedAt != now ||
+		merged.RefreshStatus != balanceRefreshError || merged.ErrorCode != balanceErrorUpstream || merged.NextRetryAt.IsZero() {
+		t.Fatalf("transient failure replaced last good: %#v", merged)
+	}
+	partial := previous
+	partial.Amount = 9000000
+	partial.Unit = ""
+	partial.UpdatedAt = now.Add(time.Second)
+	partial.CheckedAt = now.Add(time.Second)
+	partial.RefreshStatus = balanceRefreshPartial
+	partial.ErrorStage = balanceStageQuotaMetadata
+	partial.ErrorCode = balanceErrorUpstream
+	partial.Retryable = true
+	mergedPartial := mergeBalanceAttempt(previous, partial)
+	if mergedPartial.Amount != previous.Amount || mergedPartial.Unit != previous.Unit ||
+		mergedPartial.UpdatedAt != previous.UpdatedAt || mergedPartial.Status != "ok" ||
+		mergedPartial.RefreshStatus != balanceRefreshPartial {
+		t.Fatalf("partial refresh replaced the last fully converted value: %#v", mergedPartial)
+	}
+	permanentPartial := partial
+	permanentPartial.Retryable = false
+	if invalid := mergeBalanceAttempt(previous, permanentPartial); invalid.Status == "ok" {
+		t.Fatalf("non-retryable partial kept a stale value routable: %#v", invalid)
+	}
+	fatalPartial := mergeBalanceAttempt(previous, permanentPartial)
+	counts := countBalanceReports([]balanceRefreshReport{{Balance: publicBalanceAt(fatalPartial, now)}})
+	if counts.Failed != 1 || counts.Partial != 0 {
+		t.Fatalf("fatal partial was reported as partial success: %#v", counts)
+	}
+	counts = countBalanceReports([]balanceRefreshReport{{Balance: publicBalanceAt(mergedPartial, now)}})
+	if counts.Partial != 1 || counts.Failed != 0 {
+		t.Fatalf("retryable partial was not reported as partial success: %#v", counts)
+	}
+	permanent := balanceAttemptFromFailure(now.Add(time.Second), balanceFailure{
+		Status: balanceRefreshError, Stage: balanceStageAccountQuota, Code: balanceErrorMissingQuota,
+	})
+	if invalid := mergeBalanceAttempt(previous, permanent); invalid.Status == "ok" {
+		t.Fatalf("non-retryable failure kept a stale value routable: %#v", invalid)
+	}
+	authPrevious := previous
+	authPrevious.Status = balanceRefreshAuthError
+	authPrevious.ErrorCode = balanceErrorAPIKeyAuth
+	partial.Scope = balanceScopeAccountOnly
+	partial.ErrorStage = balanceStageTokenUsage
+	unresolved := mergeBalanceAttempt(authPrevious, partial)
+	if unresolved.Status != balanceRefreshAuthError {
+		t.Fatalf("account-only partial incorrectly cleared API Key authentication failure: %#v", unresolved)
+	} else if unresolved.RefreshStatus != balanceRefreshAuthError || unresolved.ErrorCode != balanceErrorAPIKeyAuth {
+		t.Fatalf("unresolved API Key authentication failure lost its source: %#v", unresolved)
+	}
+	tokenProvenPartial := partial
+	tokenProvenPartial.Scope = balanceScopeTokenOnly
+	tokenProvenPartial.ErrorStage = balanceStageQuotaMetadata
+	if stillInvalid := mergeBalanceAttempt(unresolved, tokenProvenPartial); stillInvalid.Status != balanceRefreshAuthError {
+		t.Fatalf("partial refresh cleared a fatal state without a complete success: %#v", stillInvalid)
+	}
+	unsupportedPrevious := previous
+	unsupportedPrevious.Status = balanceRefreshUnsupported
+	unsupportedPrevious.RefreshStatus = balanceRefreshUnsupported
+	unsupportedPrevious.ErrorCode = balanceErrorUnsupported
+	if stillInvalid := mergeBalanceAttempt(unsupportedPrevious, partial); stillInvalid.Status != balanceRefreshUnsupported {
+		t.Fatalf("partial refresh cleared an unsupported state without a complete success: %#v", stillInvalid)
+	}
+	auth := balanceAttemptFromFailure(now.Add(2*time.Second), balanceFailure{
+		Status: balanceRefreshAuthError, Stage: balanceStageAccountQuota, Code: balanceErrorAccountAuth,
+	})
+	merged = mergeBalanceAttempt(merged, auth)
+	if merged.Status != balanceRefreshAuthError || merged.Amount != 7 || merged.RefreshStatus != balanceRefreshAuthError {
+		t.Fatalf("auth failure did not invalidate preserved value: %#v", merged)
+	}
+	account := testAccount("a", "https://a.invalid/v1", "key")
+	app := newTestApplication(t, strategyHighestBalance, func() time.Time { return now.Add(2 * time.Second) }, account)
+	app.runtime["a"].Balance = merged
+	status := app.status()
+	if status.EffectiveStrategy != strategyLeastUsed || status.FallbackReason != "balance_unavailable" {
+		t.Fatalf("auth-invalid balance participated in routing: %#v", status)
+	}
+}
+
+func TestApplyBalanceRejectsOlderProbeResult(t *testing.T) {
+	now := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	account := testAccount("a", "https://a.invalid/v1", "key")
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	newer := balanceSnapshot{
+		Status: "ok", Amount: 9, Unit: "USD", Scope: balanceScopeActual,
+		UpdatedAt: now.Add(2 * time.Second), CheckedAt: now.Add(2 * time.Second), RefreshStatus: balanceRefreshOK,
+	}
+	app.runtime["a"].Balance = newer
+	older := balanceSnapshot{
+		Status: "ok", Amount: 1, Unit: "USD", Scope: balanceScopeActual,
+		UpdatedAt: now.Add(time.Second), CheckedAt: now.Add(time.Second), RefreshStatus: balanceRefreshOK,
+	}
+	if current, applied := app.applyBalance(account, older); applied || current.Amount != newer.Amount ||
+		app.runtime["a"].Balance.Amount != newer.Amount {
+		t.Fatalf("older probe overwrote newer balance: applied=%v current=%#v runtime=%#v",
+			applied, current, app.runtime["a"].Balance)
+	}
+}
+
+func TestBalanceTestIsIndependentAndDoesNotLeakSecrets(t *testing.T) {
+	var modelCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/responses":
+			modelCalls.Add(1)
+			http.Error(w, "model should not be called", http.StatusInternalServerError)
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":0,"unlimited_quota":true}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		case "/api/user/self":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"success":false,"message":"New-Api-User does not match token user access-secret model-secret"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "model-secret")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 42
+	account.NewAPISecret = "access-secret"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	response := adminJSON(app, http.MethodPost, "/admin/balances/test", testRequest{AccountID: "a"}, "http://127.0.0.1:4000")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || modelCalls.Load() != 0 ||
+		!strings.Contains(body, `"errorStage":"account_quota"`) ||
+		!strings.Contains(body, `"errorCode":"user_id_mismatch"`) {
+		t.Fatalf("independent balance test failed: status=%d calls=%d body=%s", response.Code, modelCalls.Load(), body)
+	}
+	if strings.Contains(body, "access-secret") || strings.Contains(body, "model-secret") || strings.Contains(body, "message") {
+		t.Fatalf("balance test leaked upstream secrets/body: %s", body)
+	}
+}
+
+func TestAccessTokenAuthErrorCode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing user id", body: `{"message":"New-Api-User header not provided"}`, want: balanceErrorUserIDRequired},
+		{name: "mismatched user id", body: `{"message":"New-Api-User does not match token user"}`, want: balanceErrorUserIDMismatch},
+		{name: "invalid access token", body: `{"message":"Access token is invalid"}`, want: balanceErrorAccessTokenAuth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := accessTokenAuthErrorCode([]byte(test.body)); got != test.want {
+				t.Fatalf("error code=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHighestBalanceRoutingUsesShortRefreshBudget(t *testing.T) {
+	now := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	first := testAccount("a", "https://a.invalid/v1", "key-a")
+	second := testAccount("b", "https://b.invalid/v1", "key-b")
+	app := newTestApplication(t, strategyHighestBalance, func() time.Time { return now }, first, second)
+	app.balanceRoutingTimeout = 30 * time.Millisecond
+	app.runtime["a"].Balance = balanceSnapshot{Status: "ok", Amount: 2, Unit: "USD", Scope: balanceScopeActual, UpdatedAt: now.Add(-time.Hour)}
+	app.runtime["b"].Balance = balanceSnapshot{Status: "ok", Amount: 1, Unit: "USD", Scope: balanceScopeActual, UpdatedAt: now.Add(-time.Hour)}
+	var calls atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		select {
+		case <-release:
+			return nil, errors.New("released")
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})}
+	started := time.Now()
+	selected, ok := app.selectAccount(context.Background(), map[string]bool{})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("routing waited too long for balance refresh: %v", elapsed)
+	}
+	if !ok || selected.ID != "a" || app.status().EffectiveStrategy != strategyLeastUsed {
+		t.Fatalf("short-budget routing selected=%q ok=%v status=%#v", selected.ID, ok, app.status())
+	}
+	firstCalls := calls.Load()
+	selected, ok = app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || selected.ID != "b" || calls.Load() != firstCalls {
+		t.Fatalf("routing backoff selected=%q ok=%v calls=%d wantCalls=%d", selected.ID, ok, calls.Load(), firstCalls)
+	}
+	releaseAll()
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !app.acquireBalanceRefresh(waitCtx) {
+		t.Fatal("route-triggered background refresh did not stop")
+	}
+	app.releaseBalanceRefresh()
+}
+
+func TestRouteTimeoutKeepsItsRefreshRunningInBackground(t *testing.T) {
+	base := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	var tick atomic.Int64
+	now := func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Millisecond) }
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyHighestBalance, now, account)
+	app.balanceRoutingTimeout = 30 * time.Millisecond
+	app.runtime["a"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 1, Unit: "USD", Scope: balanceScopeActual,
+		UpdatedAt: base.Add(-time.Hour), CheckedAt: base.Add(-time.Hour), RefreshStatus: balanceRefreshOK,
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		body := `{"data":{"total_available":1000000}}`
+		if r.URL.Path == "/api/status" {
+			body = `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(body)), Request: r,
+		}, nil
+	})}
+	selected, ok := app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || selected.ID != "a" {
+		t.Fatalf("route selection failed while starting refresh: selected=%q ok=%v", selected.ID, ok)
+	}
+	for count := 0; count < 2; count++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("route-triggered refresh did not start")
+		}
+	}
+	releaseAll()
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.mu.Lock()
+		balance := app.runtime["a"].Balance
+		app.mu.Unlock()
+		if balance.Status == "ok" && balance.RefreshStatus == balanceRefreshOK && balance.Amount == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("route-triggered background refresh did not finish: %#v", balance)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPreparedRouteRefreshIgnoresLaterBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC)
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyHighestBalance, func() time.Time { return now }, account)
+	app.runtime["a"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 1, Unit: "USD", Scope: balanceScopeActual,
+		UpdatedAt: now.Add(-time.Hour), CheckedAt: now.Add(-time.Hour), RefreshStatus: balanceRefreshOK,
+	}
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"data":{"total_available":1000000}}`
+		if r.URL.Path == "/api/status" {
+			body = `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(body)), Request: r,
+		}, nil
+	})}
+	ids := map[string]bool{"a": true}
+	accounts, order := app.prepareBalanceRefresh(ids, balanceTTL)
+	if len(accounts) != 1 {
+		t.Fatalf("prepared accounts=%d, want 1", len(accounts))
+	}
+	app.markBalanceRouteTimeout(ids)
+	reports := app.refreshBalanceAccounts(context.Background(), accounts, order)
+	if len(reports) != 1 || reports[0].Balance.Status != "ok" || reports[0].Balance.Amount != 2 {
+		t.Fatalf("prepared refresh was suppressed by later backoff: %#v", reports)
 	}
 }
 
 func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T) {
+	var balanceCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer saved-key" {
 			t.Fatalf("wrong authorization: %q", r.Header.Get("Authorization"))
@@ -1422,8 +2005,10 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 		case "/v1/responses":
 			_, _ = io.WriteString(w, `{}`)
 		case "/api/usage/token/":
+			balanceCalls.Add(1)
 			_, _ = io.WriteString(w, `{"data":{"total_available":500000}}`)
 		case "/api/status":
+			balanceCalls.Add(1)
 			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
 		default:
 			http.NotFound(w, r)
@@ -1439,11 +2024,17 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 	}
 	response := adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) ||
-		!strings.Contains(response.Body.String(), `"amount":1`) {
+		strings.Contains(response.Body.String(), `"balance"`) || balanceCalls.Load() != 0 {
 		t.Fatalf("test failed: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if !app.cfg.Accounts[0].Verified || app.cfg.Accounts[0].BlockedReason != "" {
 		t.Fatalf("matching test did not clear state: %#v", app.cfg.Accounts[0])
+	}
+	request.Candidate = &accountInput{BaseURL: server.URL + "/v1", NewAPIAuthMode: newAPIAuthPassword}
+	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) || balanceCalls.Load() != 0 {
+		t.Fatalf("incomplete balance authentication blocked model test: status=%d body=%s calls=%d",
+			response.Code, response.Body.String(), balanceCalls.Load())
 	}
 
 	app.cfg.Accounts[0].Verified = false
@@ -1584,7 +2175,9 @@ func newTestApplication(t *testing.T, strategy string, now func() time.Time, acc
 		},
 		configPath: filepath.Join(t.TempDir(), "config.dat"),
 		csrfToken:  "csrf-token", client: &http.Client{}, now: now,
-		runtime: make(map[string]*accountRuntime),
+		balanceTimeout: balanceRefreshTime, balanceRoutingTimeout: balanceRoutingTime,
+		runtime:            make(map[string]*accountRuntime),
+		balanceRefreshGate: make(chan struct{}, 1),
 	}
 	for _, account := range accounts {
 		app.runtime[account.ID] = &accountRuntime{Revision: account.Revision}

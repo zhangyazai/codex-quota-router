@@ -27,20 +27,22 @@ import (
 )
 
 const (
-	listenAddress      = "127.0.0.1:4000"
-	applicationVersion = "0.2.1"
-	configVersion      = 3
-	configDirectory    = "codex-quota-router"
-	configFilename     = "config.dat"
-	maxAdminBody       = 1 << 20
-	maxErrorBody       = 1 << 20
-	maxProxyBody       = 128 << 20
-	accountCooldown    = time.Minute
-	balanceTTL         = 5 * time.Minute
-	balanceAutoTTL     = time.Minute
-	balanceRefreshTime = 8 * time.Second
-	balanceWorkers     = 8
-	upstreamTestTime   = 30 * time.Second
+	listenAddress           = "127.0.0.1:4000"
+	applicationVersion      = "0.2.1"
+	configVersion           = 3
+	configDirectory         = "codex-quota-router"
+	configFilename          = "config.dat"
+	maxAdminBody            = 1 << 20
+	maxErrorBody            = 1 << 20
+	maxProxyBody            = 128 << 20
+	accountCooldown         = time.Minute
+	balanceTTL              = 5 * time.Minute
+	balanceAutoTTL          = time.Minute
+	balanceRefreshTime      = 20 * time.Second
+	balanceRoutingTime      = 1500 * time.Millisecond
+	balanceWorkers          = 8
+	balanceProbeParallelism = 3
+	upstreamTestTime        = 30 * time.Second
 )
 
 const (
@@ -56,8 +58,40 @@ const (
 	newAPIAuthAccessToken = "access_token"
 	newAPIUnlimitedLimit  = 100000000
 
-	balanceScopeActual    = "actual"
-	balanceScopeTokenOnly = "token_only"
+	balanceScopeActual      = "actual"
+	balanceScopeTokenOnly   = "token_only"
+	balanceScopeAccountOnly = "account_only"
+
+	balanceRefreshOK          = "ok"
+	balanceRefreshPartial     = "partial"
+	balanceRefreshError       = "error"
+	balanceRefreshAuthError   = "auth_error"
+	balanceRefreshUnsupported = "unsupported"
+	balanceRefreshCanceled    = "canceled"
+
+	balanceStageTokenUsage            = "token_usage"
+	balanceStageAccountLogin          = "account_login"
+	balanceStageAccountQuota          = "account_quota"
+	balanceStageQuotaMetadata         = "quota_metadata"
+	balanceStageDashboardSubscription = "dashboard_subscription"
+	balanceStageDashboardUsage        = "dashboard_usage"
+	balanceStageAccount               = "account"
+
+	balanceErrorTimeout         = "timeout"
+	balanceErrorNetwork         = "network_error"
+	balanceErrorAPIKeyAuth      = "api_key_unauthorized"
+	balanceErrorAccountAuth     = "account_unauthorized"
+	balanceErrorAccessTokenAuth = "access_token_unauthorized"
+	balanceErrorUserIDRequired  = "user_id_required"
+	balanceErrorUserIDMismatch  = "user_id_mismatch"
+	balanceErrorTwoFactor       = "two_factor_required"
+	balanceErrorRateLimited     = "rate_limited"
+	balanceErrorUpstream        = "upstream_unavailable"
+	balanceErrorRejected        = "upstream_rejected"
+	balanceErrorInvalidResponse = "invalid_response"
+	balanceErrorMissingQuota    = "missing_quota"
+	balanceErrorUnsupported     = "unsupported"
+	balanceErrorCanceled        = "canceled"
 )
 
 var errNewAPIAuthentication = errors.New("New API authentication failed")
@@ -140,6 +174,10 @@ type testRequest struct {
 	AllowInsecureHTTP *bool         `json:"allowInsecureHttp"`
 }
 
+type balanceRefreshRequest struct {
+	AccountIDs []string `json:"accountIds"`
+}
+
 type publicAccount struct {
 	ID                     string `json:"id"`
 	Name                   string `json:"name"`
@@ -167,28 +205,91 @@ type publicConfig struct {
 }
 
 type balanceSnapshot struct {
-	Status       string
-	Amount       float64
-	Unit         string
-	DisplayLabel string
-	Unlimited    bool
-	Scope        string
-	LimitedBy    string
-	UpdatedAt    time.Time
-	hardLimit    float64
-	hasHardLimit bool
+	Status        string
+	Amount        float64
+	Unit          string
+	DisplayLabel  string
+	Unlimited     bool
+	Scope         string
+	LimitedBy     string
+	UpdatedAt     time.Time
+	RefreshStatus string
+	CheckedAt     time.Time
+	ErrorStage    string
+	ErrorCode     string
+	Retryable     bool
+	Failures      int
+	NextRetryAt   time.Time
+	hardLimit     float64
+	hasHardLimit  bool
 }
 
 type publicBalance struct {
-	Status       string  `json:"status"`
-	Amount       float64 `json:"amount"`
-	Unit         string  `json:"unit,omitempty"`
-	DisplayLabel string  `json:"displayLabel,omitempty"`
-	Unlimited    bool    `json:"unlimited"`
-	Scope        string  `json:"scope,omitempty"`
-	LimitedBy    string  `json:"limitedBy,omitempty"`
-	UpdatedAt    string  `json:"updatedAt,omitempty"`
-	Fresh        bool    `json:"fresh"`
+	Status        string  `json:"status"`
+	Amount        float64 `json:"amount"`
+	Unit          string  `json:"unit,omitempty"`
+	DisplayLabel  string  `json:"displayLabel,omitempty"`
+	Unlimited     bool    `json:"unlimited"`
+	Scope         string  `json:"scope,omitempty"`
+	LimitedBy     string  `json:"limitedBy,omitempty"`
+	UpdatedAt     string  `json:"updatedAt,omitempty"`
+	RefreshStatus string  `json:"refreshStatus,omitempty"`
+	CheckedAt     string  `json:"checkedAt,omitempty"`
+	ErrorStage    string  `json:"errorStage,omitempty"`
+	ErrorCode     string  `json:"errorCode,omitempty"`
+	Retryable     bool    `json:"retryable,omitempty"`
+	Fresh         bool    `json:"fresh"`
+}
+
+type balanceFailure struct {
+	Status    string
+	Stage     string
+	Code      string
+	Retryable bool
+}
+
+type balanceProbeError struct {
+	failure balanceFailure
+	cause   error
+}
+
+func (err *balanceProbeError) Error() string {
+	return err.failure.Code
+}
+
+func (err *balanceProbeError) Unwrap() error {
+	return err.cause
+}
+
+type tokenBalanceResult struct {
+	balance       balanceSnapshot
+	failure       *balanceFailure
+	fromDashboard bool
+}
+
+type accountQuotaResult struct {
+	quota   float64
+	failure *balanceFailure
+}
+
+type quotaMetadataResult struct {
+	data       map[string]any
+	statusCode int
+	failure    *balanceFailure
+}
+
+type balanceRefreshReport struct {
+	AccountID string        `json:"accountId"`
+	Balance   publicBalance `json:"balance"`
+}
+
+type balanceRefreshCounts struct {
+	Total       int `json:"total"`
+	Success     int `json:"success"`
+	Partial     int `json:"partial"`
+	Failed      int `json:"failed"`
+	Unsupported int `json:"unsupported"`
+	Canceled    int `json:"canceled"`
 }
 
 type accountRuntime struct {
@@ -230,12 +331,14 @@ type routerStatus struct {
 
 type application struct {
 	mu                    sync.Mutex
-	balanceRefreshMu      sync.Mutex
+	balanceRefreshGate    chan struct{}
 	cfg                   storedConfig
 	configPath            string
 	csrfToken             string
 	client                *http.Client
 	now                   func() time.Time
+	balanceTimeout        time.Duration
+	balanceRoutingTimeout time.Duration
 	runtime               map[string]*accountRuntime
 	roundRobinCursor      int
 	lastRoutedAccountID   string
@@ -329,12 +432,15 @@ func newApplication(path string, client *http.Client, now func() time.Time) (*ap
 		return nil, err
 	}
 	app := &application{
-		cfg:        cfg,
-		configPath: path,
-		csrfToken:  csrf,
-		client:     client,
-		now:        now,
-		runtime:    make(map[string]*accountRuntime),
+		cfg:                   cfg,
+		configPath:            path,
+		csrfToken:             csrf,
+		client:                client,
+		now:                   now,
+		balanceTimeout:        balanceRefreshTime,
+		balanceRoutingTimeout: balanceRoutingTime,
+		runtime:               make(map[string]*accountRuntime),
+		balanceRefreshGate:    make(chan struct{}, 1),
 	}
 	for _, account := range cfg.Accounts {
 		app.runtime[account.ID] = &accountRuntime{Revision: account.Revision}
@@ -811,6 +917,8 @@ func (a *application) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleTest(w, r)
 	case endpoint == "/balances/refresh" && r.Method == http.MethodPost:
 		a.handleBalancesRefresh(w, r)
+	case endpoint == "/balances/test" && r.Method == http.MethodPost:
+		a.handleBalanceTest(w, r)
 	case endpoint == "/accounts/reset" && r.Method == http.MethodPost:
 		a.handleAccountReset(w, r)
 	default:
@@ -908,6 +1016,10 @@ func publicBalanceAt(balance balanceSnapshot, now time.Time) publicBalance {
 	if !balance.UpdatedAt.IsZero() {
 		updatedAt = balance.UpdatedAt.UTC().Format(time.RFC3339)
 	}
+	checkedAt := ""
+	if !balance.CheckedAt.IsZero() {
+		checkedAt = balance.CheckedAt.UTC().Format(time.RFC3339)
+	}
 	status := balance.Status
 	if status == "" {
 		status = "unknown"
@@ -919,7 +1031,9 @@ func publicBalanceAt(balance balanceSnapshot, now time.Time) publicBalance {
 	return publicBalance{
 		Status: status, Amount: balance.Amount, Unit: balance.Unit, DisplayLabel: balance.DisplayLabel,
 		Unlimited: balance.Unlimited, Scope: scope, LimitedBy: balance.LimitedBy,
-		UpdatedAt: updatedAt, Fresh: balanceFresh(balance, now),
+		UpdatedAt: updatedAt, RefreshStatus: balance.RefreshStatus, CheckedAt: checkedAt,
+		ErrorStage: balance.ErrorStage, ErrorCode: balance.ErrorCode, Retryable: balance.Retryable,
+		Fresh: balanceFresh(balance, now),
 	}
 }
 
@@ -929,6 +1043,35 @@ func balanceFresh(balance balanceSnapshot, now time.Time) bool {
 
 func balanceFreshFor(balance balanceSnapshot, now time.Time, maxAge time.Duration) bool {
 	return !balance.UpdatedAt.IsZero() && !now.After(balance.UpdatedAt.Add(maxAge))
+}
+
+func balanceRetryDelay(failures int, retryable bool) time.Duration {
+	if !retryable {
+		return 5 * time.Minute
+	}
+	switch {
+	case failures <= 1:
+		return 5 * time.Second
+	case failures == 2:
+		return 15 * time.Second
+	case failures == 3:
+		return 30 * time.Second
+	default:
+		return time.Minute
+	}
+}
+
+func balanceRefreshDue(balance balanceSnapshot, now time.Time, maxAge time.Duration) bool {
+	if maxAge <= 0 {
+		return true
+	}
+	if !balance.NextRetryAt.IsZero() && now.Before(balance.NextRetryAt) {
+		return false
+	}
+	if balance.RefreshStatus != "" && balance.RefreshStatus != balanceRefreshOK {
+		return true
+	}
+	return !balanceFreshFor(balance, now, maxAge)
 }
 
 func (a *application) effectiveStrategyLocked(now time.Time) (string, string) {
@@ -943,13 +1086,20 @@ func (a *application) effectiveStrategyLocked(now time.Time) (string, string) {
 			continue
 		}
 		found = true
-		if !balanceFresh(runtime.Balance, now) {
-			return strategyLeastUsed, "balance_stale"
-		}
 		if runtime.Balance.Status != "ok" {
 			return strategyLeastUsed, "balance_unavailable"
 		}
-		if runtime.Balance.Scope == balanceScopeTokenOnly {
+		if runtime.Balance.RefreshStatus == balanceRefreshAuthError {
+			return strategyLeastUsed, "balance_unavailable"
+		}
+		if !balanceFresh(runtime.Balance, now) {
+			return strategyLeastUsed, "balance_stale"
+		}
+		scope := runtime.Balance.Scope
+		if scope == "" {
+			scope = balanceScopeActual
+		}
+		if scope != balanceScopeActual {
 			return strategyLeastUsed, "balance_account_unverified"
 		}
 		if runtime.Balance.Unlimited {
@@ -1171,79 +1321,9 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	request.AccountID = strings.TrimSpace(request.AccountID)
-	if request.AccountID == "" && request.Candidate != nil {
-		request.AccountID = strings.TrimSpace(request.Candidate.ID)
-	}
-	a.mu.Lock()
-	model := a.cfg.TestModel
-	allowInsecureHTTP := a.cfg.AllowInsecureHTTP
-	var saved accountConfig
-	savedFound := false
-	for _, account := range a.cfg.Accounts {
-		if account.ID == request.AccountID {
-			saved = account
-			savedFound = true
-			break
-		}
-	}
-	a.mu.Unlock()
-	if request.TestModel != "" {
-		model = strings.TrimSpace(request.TestModel)
-	}
-	if request.AllowInsecureHTTP != nil {
-		allowInsecureHTTP = *request.AllowInsecureHTTP
-	}
-	candidate := saved
-	if request.Candidate != nil {
-		input := *request.Candidate
-		if err := normalizeAccountInput(&input); err != nil {
-			writeAdminError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		originChanged := savedFound && baseURLMovesToDifferentOrigin(saved.BaseURL, input.BaseURL)
-		if savedFound && saved.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey && originChanged {
-			writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
-			return
-		}
-		if savedFound && saved.NewAPISecret != "" && input.NewAPISecret == "" && !input.ClearNewAPISecret &&
-			input.NewAPIAuthMode != newAPIAuthAPIKey && originChanged {
-			writeAdminError(w, http.StatusBadRequest, "Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
-			return
-		}
-		candidate.Name = input.Name
-		candidate.BaseURL = input.BaseURL
-		if input.ClearAPIKey {
-			candidate.APIKey = ""
-		} else if input.APIKey != "" {
-			candidate.APIKey = input.APIKey
-		}
-		if err := applyNewAPIAuthInput(&candidate, saved, input); err != nil {
-			writeAdminError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	if candidate.Name == "" {
-		candidate.Name = "待测试账号"
-	}
-	validation := storedConfig{
-		Version: configVersion, Accounts: []accountConfig{candidate}, Strategy: strategyPriority,
-		AllowInsecureHTTP: allowInsecureHTTP,
-	}
-	if candidate.ID == "" {
-		candidate.ID = "candidate"
-		validation.Accounts[0].ID = candidate.ID
-	}
-	if validation.Accounts[0].Revision < 1 {
-		validation.Accounts[0].Revision = 1
-	}
-	if err := normalizeAndValidateConfig(&validation); err != nil {
+	candidate, saved, savedFound, model, err := a.prepareTestCandidate(request, false)
+	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	candidate = validation.Accounts[0]
-	if !accountConfigured(candidate) {
-		writeAdminError(w, http.StatusBadRequest, "该账号尚未完整配置")
 		return
 	}
 	if model == "" {
@@ -1282,37 +1362,186 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	ok := response.StatusCode >= 200 && response.StatusCode < 300
 	message := "连接成功"
-	balance := balanceSnapshot{Status: "unknown"}
 	if !ok {
 		message = redactSecrets(upstreamErrorMessage(response.StatusCode, body), candidate.APIKey, candidate.NewAPISecret)
-	} else {
-		if matchesSaved {
-			a.markAccountTestSucceeded(saved)
-		}
-		balanceContext, balanceCancel := newBalanceRefreshContext(ctx)
-		balance = a.probeBalance(balanceContext, candidate)
-		balanceComplete := balanceContext.Err() == nil
-		balanceCancel()
-		if !balanceComplete {
-			balance = balanceSnapshot{Status: "error", UpdatedAt: a.now()}
-		}
-		if matchesSaved && balanceComplete {
-			a.applyBalance(saved, balance)
-		}
+	} else if matchesSaved {
+		a.markAccountTestSucceeded(saved)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": ok, "statusCode": response.StatusCode, "latencyMs": latency, "message": message,
-		"balance": publicBalanceAt(balance, a.now()),
 	})
 }
 
+func (a *application) prepareTestCandidate(request testRequest, includeBalanceAuth bool) (accountConfig, accountConfig, bool, string, error) {
+	request.AccountID = strings.TrimSpace(request.AccountID)
+	if request.AccountID == "" && request.Candidate != nil {
+		request.AccountID = strings.TrimSpace(request.Candidate.ID)
+	}
+	a.mu.Lock()
+	model := a.cfg.TestModel
+	allowInsecureHTTP := a.cfg.AllowInsecureHTTP
+	var saved accountConfig
+	savedFound := false
+	for _, account := range a.cfg.Accounts {
+		if account.ID == request.AccountID {
+			saved = account
+			savedFound = true
+			break
+		}
+	}
+	a.mu.Unlock()
+	if request.TestModel != "" {
+		model = strings.TrimSpace(request.TestModel)
+	}
+	if request.AllowInsecureHTTP != nil {
+		allowInsecureHTTP = *request.AllowInsecureHTTP
+	}
+	candidate := saved
+	if request.Candidate != nil {
+		input := *request.Candidate
+		if err := normalizeAccountInput(&input); err != nil {
+			return accountConfig{}, accountConfig{}, false, "", err
+		}
+		originChanged := savedFound && baseURLMovesToDifferentOrigin(saved.BaseURL, input.BaseURL)
+		if savedFound && saved.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey && originChanged {
+			return accountConfig{}, accountConfig{}, false, "", errors.New("Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
+		}
+		if includeBalanceAuth && savedFound && saved.NewAPISecret != "" && input.NewAPISecret == "" && !input.ClearNewAPISecret &&
+			input.NewAPIAuthMode != newAPIAuthAPIKey && originChanged {
+			return accountConfig{}, accountConfig{}, false, "", errors.New("Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
+		}
+		candidate.Name = input.Name
+		candidate.BaseURL = input.BaseURL
+		if input.ClearAPIKey {
+			candidate.APIKey = ""
+		} else if input.APIKey != "" {
+			candidate.APIKey = input.APIKey
+		}
+		if includeBalanceAuth {
+			if err := applyNewAPIAuthInput(&candidate, saved, input); err != nil {
+				return accountConfig{}, accountConfig{}, false, "", err
+			}
+		}
+	}
+	if candidate.Name == "" {
+		candidate.Name = "待测试账号"
+	}
+	validation := storedConfig{
+		Version: configVersion, Accounts: []accountConfig{candidate}, Strategy: strategyPriority,
+		AllowInsecureHTTP: allowInsecureHTTP,
+	}
+	if candidate.ID == "" {
+		candidate.ID = "candidate"
+		validation.Accounts[0].ID = candidate.ID
+	}
+	if validation.Accounts[0].Revision < 1 {
+		validation.Accounts[0].Revision = 1
+	}
+	if err := normalizeAndValidateConfig(&validation); err != nil {
+		return accountConfig{}, accountConfig{}, false, "", err
+	}
+	candidate = validation.Accounts[0]
+	if !accountConfigured(candidate) {
+		return accountConfig{}, accountConfig{}, false, "", errors.New("该账号尚未完整配置")
+	}
+	return candidate, saved, savedFound, model, nil
+}
+
 func (a *application) handleBalancesRefresh(w http.ResponseWriter, r *http.Request) {
+	var request balanceRefreshRequest
+	if r.ContentLength != 0 {
+		if err := decodeJSONBody(w, r, &request); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	var ids map[string]bool
+	for _, id := range request.AccountIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if ids == nil {
+			ids = make(map[string]bool)
+		}
+		ids[id] = true
+	}
 	maxAge := time.Duration(0)
 	if r.URL.Query().Get("automatic") == "1" {
 		maxAge = balanceAutoTTL
 	}
-	a.refreshBalances(r.Context(), nil, maxAge)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": a.status()})
+	reports := a.refreshBalances(r.Context(), ids, maxAge)
+	counts := countBalanceReports(reports)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     counts.Failed == 0 && counts.Canceled == 0,
+		"counts": counts, "reports": reports, "status": a.status(),
+	})
+}
+
+func countBalanceReports(reports []balanceRefreshReport) balanceRefreshCounts {
+	counts := balanceRefreshCounts{Total: len(reports)}
+	for _, report := range reports {
+		switch {
+		case report.Balance.RefreshStatus == balanceRefreshCanceled:
+			counts.Canceled++
+		case report.Balance.Status == balanceRefreshUnsupported ||
+			report.Balance.RefreshStatus == balanceRefreshUnsupported:
+			counts.Unsupported++
+		case report.Balance.Status != "ok":
+			counts.Failed++
+		case report.Balance.RefreshStatus == balanceRefreshPartial:
+			counts.Partial++
+		case report.Balance.RefreshStatus == balanceRefreshOK || report.Balance.RefreshStatus == "":
+			counts.Success++
+		default:
+			counts.Failed++
+		}
+	}
+	return counts
+}
+
+func (a *application) handleBalanceTest(w http.ResponseWriter, r *http.Request) {
+	var request testRequest
+	if err := decodeJSONBody(w, r, &request); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	candidate, saved, savedFound, _, err := a.prepareTestCandidate(request, true)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := a.newBalanceRefreshContext(r.Context())
+	if !a.acquireBalanceRefresh(ctx) {
+		balance := canceledBalanceAttempt(a.now())
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && r.Context().Err() == nil {
+			balance = timeoutBalanceAttempt(balanceSnapshot{}, a.now())
+		}
+		cancel()
+		public := publicBalanceAt(balance, a.now())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "balance": public,
+			"report": balanceRefreshReport{AccountID: candidate.ID, Balance: public},
+		})
+		return
+	}
+	defer a.releaseBalanceRefresh()
+	balance := a.probeBalance(ctx, candidate)
+	ctxErr := ctx.Err()
+	cancel()
+	if errors.Is(ctxErr, context.DeadlineExceeded) && r.Context().Err() == nil {
+		balance = timeoutBalanceAttempt(balance, a.now())
+	}
+	if savedFound && sameAccountRevision(saved, candidate) && r.Context().Err() == nil {
+		if merged, applied := a.applyBalance(saved, balance); applied {
+			balance = merged
+		}
+	}
+	public := publicBalanceAt(balance, a.now())
+	report := balanceRefreshReport{AccountID: candidate.ID, Balance: public}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": public.Status == "ok", "balance": public, "report": report,
+	})
 }
 
 func (a *application) handleAccountReset(w http.ResponseWriter, r *http.Request) {
@@ -1491,14 +1720,24 @@ func (a *application) selectAccount(ctx context.Context, attempted map[string]bo
 		stale = make(map[string]bool)
 		for _, account := range a.cfg.Accounts {
 			runtime := a.runtimeForLocked(account)
-			if accountState(account, runtime, now) == "available" && !balanceFresh(runtime.Balance, now) {
+			if accountState(account, runtime, now) == "available" && balanceRefreshDue(runtime.Balance, now, balanceTTL) {
 				stale[account.ID] = true
 			}
 		}
 	}
 	a.mu.Unlock()
 	if len(stale) != 0 {
-		a.refreshBalances(ctx, stale, balanceTTL)
+		routingTimeout := a.balanceRoutingTimeout
+		if routingTimeout <= 0 {
+			routingTimeout = balanceRoutingTime
+		}
+		routeCtx, cancel := context.WithTimeout(ctx, routingTimeout)
+		a.refreshBalancesForRoute(routeCtx, stale, balanceTTL)
+		routeErr := routeCtx.Err()
+		cancel()
+		if errors.Is(routeErr, context.DeadlineExceeded) {
+			a.markBalanceRouteTimeout(stale)
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1566,6 +1805,34 @@ func (a *application) selectAccount(ctx context.Context, attempted map[string]bo
 	a.lastRoutedAccountID = chosen.account.ID
 	a.lastRoutedAccountName = chosen.account.Name
 	return chosen.account, true
+}
+
+func (a *application) markBalanceRouteTimeout(ids map[string]bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	for _, account := range a.cfg.Accounts {
+		if !ids[account.ID] {
+			continue
+		}
+		runtime := a.runtimeForLocked(account)
+		if !balanceRefreshDue(runtime.Balance, now, balanceTTL) {
+			continue
+		}
+		failures := runtime.Balance.Failures + 1
+		if failures < 1 {
+			failures = 1
+		}
+		runtime.Balance.RefreshStatus = balanceRefreshError
+		runtime.Balance.ErrorStage = balanceStageAccount
+		runtime.Balance.ErrorCode = balanceErrorTimeout
+		runtime.Balance.Retryable = true
+		runtime.Balance.Failures = failures
+		runtime.Balance.NextRetryAt = now.Add(balanceRetryDelay(failures, true))
+		if runtime.Balance.UpdatedAt.IsZero() {
+			runtime.Balance.Status = balanceRefreshError
+		}
+	}
 }
 
 func (a *application) markAccountVerified(expected accountConfig) {
@@ -1656,14 +1923,85 @@ func sameAccountRevision(current, expected accountConfig) bool {
 		current.NewAPISecret == expected.NewAPISecret
 }
 
-func (a *application) applyBalance(expected accountConfig, balance balanceSnapshot) {
+func mergeBalanceAttempt(previous, attempt balanceSnapshot) balanceSnapshot {
+	if attempt.CheckedAt.IsZero() {
+		attempt.CheckedAt = attempt.UpdatedAt
+	}
+	if attempt.RefreshStatus == "" {
+		attempt.RefreshStatus = attempt.Status
+	}
+	if attempt.RefreshStatus == balanceRefreshOK {
+		attempt.Status = "ok"
+		attempt.Failures = 0
+		attempt.NextRetryAt = time.Time{}
+		attempt.ErrorStage = ""
+		attempt.ErrorCode = ""
+		attempt.Retryable = false
+		return attempt
+	}
+
+	failures := previous.Failures + 1
+	if failures < 1 {
+		failures = 1
+	}
+	attempt.Failures = failures
+	attempt.NextRetryAt = attempt.CheckedAt.Add(balanceRetryDelay(failures, attempt.Retryable))
+	if attempt.RefreshStatus == balanceRefreshPartial {
+		attempt.Status = "ok"
+		if previous.UpdatedAt.IsZero() {
+			return attempt
+		}
+		merged := previous
+		if previous.Status == "ok" {
+			merged.Status = "ok"
+			merged.RefreshStatus = attempt.RefreshStatus
+			merged.ErrorStage = attempt.ErrorStage
+			merged.ErrorCode = attempt.ErrorCode
+		} else if merged.RefreshStatus == "" || merged.RefreshStatus == balanceRefreshOK {
+			merged.RefreshStatus = merged.Status
+		}
+		merged.CheckedAt = attempt.CheckedAt
+		merged.Retryable = attempt.Retryable
+		merged.Failures = attempt.Failures
+		merged.NextRetryAt = attempt.NextRetryAt
+		if previous.Status == "ok" && !attempt.Retryable {
+			merged.Status = balanceRefreshError
+		}
+		return merged
+	}
+	if previous.UpdatedAt.IsZero() {
+		return attempt
+	}
+
+	merged := previous
+	merged.RefreshStatus = attempt.RefreshStatus
+	merged.CheckedAt = attempt.CheckedAt
+	merged.ErrorStage = attempt.ErrorStage
+	merged.ErrorCode = attempt.ErrorCode
+	merged.Retryable = attempt.Retryable
+	merged.Failures = attempt.Failures
+	merged.NextRetryAt = attempt.NextRetryAt
+	if attempt.RefreshStatus == balanceRefreshAuthError || attempt.RefreshStatus == balanceRefreshUnsupported ||
+		!attempt.Retryable {
+		merged.Status = attempt.Status
+	}
+	return merged
+}
+
+func (a *application) applyBalance(expected accountConfig, balance balanceSnapshot) (balanceSnapshot, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
 	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
-		return
+		return balanceSnapshot{}, false
 	}
-	a.runtimeForLocked(a.cfg.Accounts[index]).Balance = balance
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	if !balance.CheckedAt.IsZero() && !runtime.Balance.CheckedAt.IsZero() &&
+		balance.CheckedAt.Before(runtime.Balance.CheckedAt) {
+		return runtime.Balance, false
+	}
+	runtime.Balance = mergeBalanceAttempt(runtime.Balance, balance)
+	return runtime.Balance, true
 }
 
 func newAPIAuthHash(account accountConfig) [sha256.Size]byte {
@@ -1781,15 +2119,96 @@ func newBalanceRefreshContext(parent context.Context) (context.Context, context.
 	return context.WithTimeout(parent, balanceRefreshTime)
 }
 
-func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, maxAge time.Duration) {
-	a.balanceRefreshMu.Lock()
-	defer a.balanceRefreshMu.Unlock()
-	ctx, cancel := newBalanceRefreshContext(ctx)
-	defer cancel()
+func (a *application) newBalanceRefreshContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := a.balanceTimeout
+	if timeout <= 0 {
+		timeout = balanceRefreshTime
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func (a *application) acquireBalanceRefresh(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case a.balanceRefreshGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (a *application) releaseBalanceRefresh() {
+	<-a.balanceRefreshGate
+}
+
+func timeoutBalanceAttempt(balance balanceSnapshot, checkedAt time.Time) balanceSnapshot {
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	balance.Status = balanceRefreshError
+	balance.RefreshStatus = balanceRefreshError
+	balance.CheckedAt = checkedAt
+	balance.UpdatedAt = time.Time{}
+	balance.ErrorStage = balanceStageAccount
+	balance.ErrorCode = balanceErrorTimeout
+	balance.Retryable = true
+	return balance
+}
+
+func canceledBalanceAttempt(checkedAt time.Time) balanceSnapshot {
+	return balanceSnapshot{
+		Status: balanceRefreshError, RefreshStatus: balanceRefreshCanceled, CheckedAt: checkedAt,
+		ErrorStage: balanceStageAccount, ErrorCode: balanceErrorCanceled,
+	}
+}
+
+func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, maxAge time.Duration) []balanceRefreshReport {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !a.acquireBalanceRefresh(ctx) {
+		return nil
+	}
+	defer a.releaseBalanceRefresh()
+	accounts, order := a.prepareBalanceRefresh(ids, maxAge)
+	return a.refreshBalanceAccounts(ctx, accounts, order)
+}
+
+func (a *application) refreshBalancesForRoute(ctx context.Context, ids map[string]bool, maxAge time.Duration) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !a.acquireBalanceRefresh(ctx) {
+		return
+	}
+	accounts, order := a.prepareBalanceRefresh(ids, maxAge)
+	if len(accounts) == 0 {
+		a.releaseBalanceRefresh()
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer a.releaseBalanceRefresh()
+		a.refreshBalanceAccounts(context.Background(), accounts, order)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+func (a *application) prepareBalanceRefresh(ids map[string]bool, maxAge time.Duration) ([]accountConfig, map[string]int) {
 	a.mu.Lock()
 	now := a.now()
 	accounts := make([]accountConfig, 0, len(a.cfg.Accounts))
 	updatedAt := make(map[string]time.Time, len(a.cfg.Accounts))
+	order := make(map[string]int, len(a.cfg.Accounts))
 	for _, account := range a.cfg.Accounts {
 		if ids != nil && !ids[account.ID] {
 			continue
@@ -1798,7 +2217,8 @@ func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, 
 			continue
 		}
 		runtime := a.runtimeForLocked(account)
-		if accountConfigured(account) && (maxAge <= 0 || !balanceFreshFor(runtime.Balance, now, maxAge)) {
+		if accountConfigured(account) && balanceRefreshDue(runtime.Balance, now, maxAge) {
+			order[account.ID] = len(order)
 			accounts = append(accounts, account)
 			updatedAt[account.ID] = runtime.Balance.UpdatedAt
 		}
@@ -1807,20 +2227,38 @@ func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, 
 	if maxAge > 0 {
 		sortAccountsByBalanceAge(accounts, updatedAt)
 	}
+	return accounts, order
+}
+
+func (a *application) refreshBalanceAccounts(ctx context.Context, accounts []accountConfig, order map[string]int) []balanceRefreshReport {
 	workerCount := balanceWorkers
 	if len(accounts) < workerCount {
 		workerCount = len(accounts)
 	}
 	jobs := make(chan accountConfig)
+	reports := make(chan balanceRefreshReport, len(accounts))
 	var wait sync.WaitGroup
 	for worker := 0; worker < workerCount; worker++ {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			for account := range jobs {
-				balance := a.probeBalance(ctx, account)
-				if ctx.Err() == nil {
-					a.applyBalance(account, balance)
+				accountCtx, cancel := a.newBalanceRefreshContext(ctx)
+				balance := a.probeBalance(accountCtx, account)
+				accountErr := accountCtx.Err()
+				cancel()
+				if ctx.Err() != nil {
+					reports <- balanceRefreshReport{
+						AccountID: account.ID, Balance: publicBalanceAt(canceledBalanceAttempt(a.now()), a.now()),
+					}
+					continue
+				}
+				if errors.Is(accountErr, context.DeadlineExceeded) {
+					balance = timeoutBalanceAttempt(balance, a.now())
+				}
+				merged, applied := a.applyBalance(account, balance)
+				if applied {
+					reports <- balanceRefreshReport{AccountID: account.ID, Balance: publicBalanceAt(merged, a.now())}
 				}
 			}
 		}()
@@ -1831,11 +2269,25 @@ func (a *application) refreshBalances(ctx context.Context, ids map[string]bool, 
 		case <-ctx.Done():
 			close(jobs)
 			wait.Wait()
-			return
+			close(reports)
+			result := make([]balanceRefreshReport, 0, len(reports))
+			for report := range reports {
+				result = append(result, report)
+			}
+			return result
 		}
 	}
 	close(jobs)
 	wait.Wait()
+	close(reports)
+	result := make([]balanceRefreshReport, 0, len(accounts))
+	for report := range reports {
+		result = append(result, report)
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		return order[result[left].AccountID] < order[result[right].AccountID]
+	})
+	return result
 }
 
 func sortAccountsByBalanceAge(accounts []accountConfig, updatedAt map[string]time.Time) {
@@ -1849,162 +2301,312 @@ func sortAccountsByBalanceAge(accounts []accountConfig, updatedAt map[string]tim
 	})
 }
 
-func (a *application) probeBalance(ctx context.Context, account accountConfig) balanceSnapshot {
-	checkedAt := a.now()
-	result := balanceSnapshot{Status: "error", UpdatedAt: checkedAt}
+func balanceFailureFor(stage string, statusCode int, err error) balanceFailure {
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return balanceFailure{Status: balanceRefreshError, Stage: stage, Code: balanceErrorTimeout, Retryable: true}
+		}
+		if errors.Is(err, context.Canceled) {
+			return balanceFailure{Status: balanceRefreshCanceled, Stage: stage, Code: balanceErrorCanceled}
+		}
+		return balanceFailure{Status: balanceRefreshError, Stage: stage, Code: balanceErrorNetwork, Retryable: true}
+	}
+	accountStage := stage == balanceStageAccountLogin || stage == balanceStageAccountQuota
+	switch {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+		code := balanceErrorAPIKeyAuth
+		if accountStage {
+			code = balanceErrorAccountAuth
+		}
+		return balanceFailure{Status: balanceRefreshAuthError, Stage: stage, Code: code}
+	case statusCode == http.StatusNotFound:
+		return balanceFailure{Status: balanceRefreshUnsupported, Stage: stage, Code: balanceErrorUnsupported}
+	case statusCode == http.StatusTooManyRequests:
+		return balanceFailure{Status: balanceRefreshError, Stage: stage, Code: balanceErrorRateLimited, Retryable: true}
+	case statusCode >= 500:
+		return balanceFailure{Status: balanceRefreshError, Stage: stage, Code: balanceErrorUpstream, Retryable: true}
+	default:
+		return balanceFailure{Status: balanceRefreshError, Stage: stage, Code: balanceErrorRejected}
+	}
+}
+
+func failureFromError(stage string, err error) balanceFailure {
+	var probeErr *balanceProbeError
+	if errors.As(err, &probeErr) {
+		return probeErr.failure
+	}
+	if errors.Is(err, errNewAPIAuthentication) {
+		return balanceFailure{Status: balanceRefreshAuthError, Stage: stage, Code: balanceErrorAccountAuth}
+	}
+	return balanceFailureFor(stage, 0, err)
+}
+
+func balanceAttemptFromFailure(checkedAt time.Time, failure balanceFailure) balanceSnapshot {
+	status := failure.Status
+	if status == balanceRefreshCanceled {
+		status = balanceRefreshError
+	}
+	return balanceSnapshot{
+		Status: status, RefreshStatus: failure.Status, CheckedAt: checkedAt,
+		ErrorStage: failure.Stage, ErrorCode: failure.Code, Retryable: failure.Retryable,
+	}
+}
+
+func markBalancePartial(balance balanceSnapshot, failure balanceFailure) balanceSnapshot {
+	balance.Status = "ok"
+	balance.RefreshStatus = balanceRefreshPartial
+	balance.ErrorStage = failure.Stage
+	balance.ErrorCode = failure.Code
+	balance.Retryable = failure.Retryable
+	return balance
+}
+
+func (a *application) probeTokenBalance(ctx context.Context, account accountConfig, checkedAt time.Time) tokenBalanceResult {
 	usageURL, err := balanceAPIURL(account.BaseURL, "/api/usage/token/")
 	if err != nil {
-		return result
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageTokenUsage, Code: balanceErrorInvalidResponse}
+		return tokenBalanceResult{failure: &failure}
 	}
-	status, body, err := a.getUpstreamJSON(ctx, usageURL, account.APIKey)
-	if err != nil {
-		return result
+	status, body, requestErr := a.getUpstreamJSON(ctx, usageURL, account.APIKey)
+	if requestErr != nil {
+		failure := balanceFailureFor(balanceStageTokenUsage, status, requestErr)
+		return tokenBalanceResult{failure: &failure}
 	}
 	if status == http.StatusNotFound {
-		return a.probeBalanceFallback(ctx, account, checkedAt)
+		balance := a.probeDashboardBalance(ctx, account, checkedAt)
+		if balance.Status != "ok" {
+			failure := balanceFailure{
+				Status: balance.RefreshStatus, Stage: balance.ErrorStage, Code: balance.ErrorCode, Retryable: balance.Retryable,
+			}
+			return tokenBalanceResult{balance: balance, failure: &failure, fromDashboard: true}
+		}
+		return tokenBalanceResult{balance: balance, fromDashboard: true}
 	}
 	if status < 200 || status >= 300 {
-		return result
+		failure := balanceFailureFor(balanceStageTokenUsage, status, nil)
+		return tokenBalanceResult{failure: &failure}
 	}
 	payload, ok := decodeJSONObject(body)
 	if !ok {
-		return a.probeBalanceFallback(ctx, account, checkedAt)
+		balance := a.probeDashboardBalance(ctx, account, checkedAt)
+		if balance.Status != "ok" {
+			failure := balanceFailure{
+				Status: balance.RefreshStatus, Stage: balance.ErrorStage, Code: balance.ErrorCode, Retryable: balance.Retryable,
+			}
+			return tokenBalanceResult{balance: balance, failure: &failure, fromDashboard: true}
+		}
+		return tokenBalanceResult{balance: balance, fromDashboard: true}
+	}
+	if success, exists := boolValue(payload["success"]); exists && !success {
+		failure := balanceFailure{
+			Status: balanceRefreshAuthError, Stage: balanceStageTokenUsage, Code: balanceErrorAPIKeyAuth,
+		}
+		return tokenBalanceResult{failure: &failure}
 	}
 	data := nestedObject(payload, "data")
 	unlimited, _ := boolValue(data["unlimited_quota"])
 	total, hasTotal := numberValue(data["total_available"])
 	if !unlimited && !hasTotal {
-		return a.probeBalanceFallback(ctx, account, checkedAt)
-	}
-	result.Status = "ok"
-	result.Amount = total
-	result.Unlimited = unlimited
-	result.Scope = balanceScopeTokenOnly
-	result.DisplayLabel = "站点额度"
-
-	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) != newAPIAuthAPIKey {
-		accountQuota, quotaErr := a.probeNewAPIAccountQuota(ctx, account)
-		if quotaErr != nil {
-			result.Status = "error"
-			if errors.Is(quotaErr, errNewAPIAuthentication) {
-				result.Status = "auth_error"
+		balance := a.probeDashboardBalance(ctx, account, checkedAt)
+		if balance.Status != "ok" {
+			failure := balanceFailure{
+				Status: balance.RefreshStatus, Stage: balance.ErrorStage, Code: balance.ErrorCode, Retryable: balance.Retryable,
 			}
-			return result
+			return tokenBalanceResult{balance: balance, failure: &failure, fromDashboard: true}
 		}
-		if accountQuota < 0 {
-			accountQuota = 0
+		return tokenBalanceResult{balance: balance, fromDashboard: true}
+	}
+	return tokenBalanceResult{balance: balanceSnapshot{
+		Status: "ok", Amount: total, Unlimited: unlimited, Scope: balanceScopeTokenOnly,
+		DisplayLabel: "站点额度", UpdatedAt: checkedAt, RefreshStatus: balanceRefreshOK, CheckedAt: checkedAt,
+	}}
+}
+
+func (a *application) probeQuotaMetadata(ctx context.Context, account accountConfig) quotaMetadataResult {
+	data, statusCode, err := a.getNewAPIStatus(ctx, account)
+	if err != nil {
+		failure := failureFromError(balanceStageQuotaMetadata, err)
+		return quotaMetadataResult{statusCode: statusCode, failure: &failure}
+	}
+	return quotaMetadataResult{data: data, statusCode: statusCode}
+}
+
+func (a *application) probeAccountQuota(ctx context.Context, account accountConfig) accountQuotaResult {
+	quota, err := a.probeNewAPIAccountQuota(ctx, account)
+	if err != nil {
+		failure := failureFromError(balanceStageAccountQuota, err)
+		return accountQuotaResult{failure: &failure}
+	}
+	if quota < 0 {
+		quota = 0
+	}
+	return accountQuotaResult{quota: quota}
+}
+
+func (a *application) probeBalance(ctx context.Context, account accountConfig) balanceSnapshot {
+	checkedAt := a.now()
+	tokenChannel := make(chan tokenBalanceResult, 1)
+	metadataChannel := make(chan quotaMetadataResult, 1)
+	go func() { tokenChannel <- a.probeTokenBalance(ctx, account, checkedAt) }()
+	go func() { metadataChannel <- a.probeQuotaMetadata(ctx, account) }()
+
+	mode := normalizeNewAPIAuthMode(account.NewAPIAuthMode)
+	var accountChannel chan accountQuotaResult
+	if mode != newAPIAuthAPIKey {
+		accountChannel = make(chan accountQuotaResult, 1)
+		go func() { accountChannel <- a.probeAccountQuota(ctx, account) }()
+	}
+
+	token := <-tokenChannel
+	metadata := <-metadataChannel
+	var accountQuota accountQuotaResult
+	if accountChannel != nil {
+		accountQuota = <-accountChannel
+	}
+
+	if token.failure != nil {
+		result := balanceAttemptFromFailure(checkedAt, *token.failure)
+		if token.failure.Status != balanceRefreshAuthError && accountChannel != nil &&
+			accountQuota.failure == nil && metadata.failure == nil {
+			amount, unit, label, converted := convertNewAPIQuota(accountQuota.quota, metadata.data)
+			if converted {
+				partial := balanceSnapshot{
+					Status: "ok", Amount: amount, Unit: unit, DisplayLabel: label,
+					Scope: balanceScopeAccountOnly, UpdatedAt: checkedAt, CheckedAt: checkedAt,
+				}
+				return markBalancePartial(partial, *token.failure)
+			}
+		}
+		return result
+	}
+
+	result := token.balance
+	result.CheckedAt = checkedAt
+	if accountChannel != nil && accountQuota.failure != nil {
+		result.Status = accountQuota.failure.Status
+		result.RefreshStatus = accountQuota.failure.Status
+		result.UpdatedAt = time.Time{}
+		result.ErrorStage = accountQuota.failure.Stage
+		result.ErrorCode = accountQuota.failure.Code
+		result.Retryable = accountQuota.failure.Retryable
+		return result
+	}
+
+	if token.fromDashboard && mode != newAPIAuthAPIKey {
+		if metadata.failure != nil {
+			if result.Unit != "" {
+				result.Scope = balanceScopeTokenOnly
+				return markBalancePartial(result, *metadata.failure)
+			}
+			return balanceAttemptFromFailure(checkedAt, *metadata.failure)
+		}
+		accountAmount, accountUnit, _, converted := convertNewAPIQuota(accountQuota.quota, metadata.data)
+		if !converted {
+			failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse, Retryable: true}
+			return balanceAttemptFromFailure(checkedAt, failure)
+		}
+		if result.hasHardLimit {
+			amount, unit, label, converted := convertUSDToDisplay(result.Amount, metadata.data)
+			if !converted {
+				failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse, Retryable: true}
+				return balanceAttemptFromFailure(checkedAt, failure)
+			}
+			result.Amount = amount
+			result.Unit = unit
+			result.DisplayLabel = label
+		}
+		if result.Unit != accountUnit {
+			failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse, Retryable: true}
+			return balanceAttemptFromFailure(checkedAt, failure)
 		}
 		result.Scope = balanceScopeActual
 		result.Unlimited = false
-		if unlimited || accountQuota < result.Amount {
-			result.Amount = accountQuota
+		if accountAmount < result.Amount {
+			result.Amount = accountAmount
+			result.LimitedBy = "account"
+		} else {
+			result.LimitedBy = "token"
+		}
+	} else if accountChannel != nil {
+		result.Scope = balanceScopeActual
+		result.Unlimited = false
+		if token.balance.Unlimited || accountQuota.quota < result.Amount {
+			result.Amount = accountQuota.quota
 			result.LimitedBy = "account"
 		} else {
 			result.LimitedBy = "token"
 		}
 	}
 
-	statusData, statusCode, statusErr := a.getNewAPIStatus(ctx, account)
-	if statusErr != nil || statusCode < 200 || statusCode >= 300 {
-		return result
+	if metadata.failure != nil {
+		if token.fromDashboard && mode == newAPIAuthAPIKey && metadata.statusCode == http.StatusNotFound {
+			if result.hasHardLimit && result.hardLimit >= newAPIUnlimitedLimit {
+				result.Unlimited = true
+			} else {
+				result.Scope = balanceScopeActual
+			}
+			result.RefreshStatus = balanceRefreshOK
+			return result
+		}
+		if result.Unit != "" {
+			return markBalancePartial(result, *metadata.failure)
+		}
+		return balanceAttemptFromFailure(checkedAt, *metadata.failure)
 	}
-	if amount, unit, label, converted := convertNewAPIQuota(result.Amount, statusData); converted {
-		result.Amount = amount
-		result.Unit = unit
-		result.DisplayLabel = label
+	if !token.fromDashboard || result.Unit == "" {
+		if amount, unit, label, converted := convertNewAPIQuota(result.Amount, metadata.data); converted {
+			result.Amount = amount
+			result.Unit = unit
+			result.DisplayLabel = label
+		} else {
+			failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse, Retryable: true}
+			return balanceAttemptFromFailure(checkedAt, failure)
+		}
 	}
 
-	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) == newAPIAuthAPIKey && result.Unlimited {
+	if mode == newAPIAuthAPIKey && !token.fromDashboard && result.Unlimited {
 		dashboard := a.probeDashboardBalance(ctx, account, checkedAt)
-		if dashboard.Status == "ok" {
-			if dashboard.hasHardLimit && result.Unit != "" {
-				dashboard.Unit = result.Unit
-				dashboard.DisplayLabel = result.DisplayLabel
-			}
-			comparable := result.Unit == dashboard.Unit
-			switch {
-			case comparable && result.Unlimited && dashboard.hasHardLimit && dashboard.hardLimit < newAPIUnlimitedLimit:
+		if dashboard.Status == "ok" && dashboard.hasHardLimit && dashboard.hardLimit < newAPIUnlimitedLimit {
+			amount, unit, label, converted := convertUSDToDisplay(dashboard.Amount, metadata.data)
+			if converted && result.Unit == unit {
+				dashboard.Amount = amount
+				dashboard.Unit = unit
+				dashboard.DisplayLabel = label
 				dashboard.Scope = balanceScopeActual
 				dashboard.LimitedBy = "account"
 				return dashboard
 			}
 		}
 	}
+	result.Status = "ok"
+	result.UpdatedAt = checkedAt
+	result.RefreshStatus = balanceRefreshOK
 	return result
 }
 
 func (a *application) probeBalanceFallback(ctx context.Context, account accountConfig, checkedAt time.Time) balanceSnapshot {
-	dashboard := a.probeDashboardBalance(ctx, account, checkedAt)
-	if dashboard.Status != "ok" {
-		return dashboard
-	}
-	dashboard.Scope = balanceScopeTokenOnly
-	statusData, statusCode, statusErr := a.getNewAPIStatus(ctx, account)
-	if statusCode == http.StatusNotFound {
-		if dashboard.hasHardLimit && dashboard.hardLimit >= newAPIUnlimitedLimit {
-			dashboard.Unlimited = true
-			return dashboard
-		}
-		dashboard.Scope = balanceScopeActual
-		return dashboard
-	}
-	if statusErr != nil || statusCode < 200 || statusCode >= 300 {
-		return dashboard
-	}
-	if normalizeNewAPIAuthMode(account.NewAPIAuthMode) == newAPIAuthAPIKey {
-		if dashboard.hasHardLimit && dashboard.hardLimit >= newAPIUnlimitedLimit {
-			dashboard.Unlimited = true
-		}
-		return dashboard
-	}
-
-	accountQuota, quotaErr := a.probeNewAPIAccountQuota(ctx, account)
-	if quotaErr != nil {
-		dashboard.Status = "error"
-		if errors.Is(quotaErr, errNewAPIAuthentication) {
-			dashboard.Status = "auth_error"
-		}
-		return dashboard
-	}
-	if accountQuota < 0 {
-		accountQuota = 0
-	}
-	accountAmount, accountUnit, accountLabel, converted := convertNewAPIQuota(accountQuota, statusData)
-	if !converted {
-		dashboard.Status = "error"
-		return dashboard
-	}
-	if dashboard.hasHardLimit {
-		dashboard.Unit = accountUnit
-		dashboard.DisplayLabel = accountLabel
-	}
-	if dashboard.Unit != accountUnit {
-		dashboard.Status = "error"
-		return dashboard
-	}
-	dashboard.Scope = balanceScopeActual
-	dashboard.Unlimited = false
-	if accountAmount < dashboard.Amount {
-		dashboard.Amount = accountAmount
-		dashboard.LimitedBy = "account"
-	} else {
-		dashboard.LimitedBy = "token"
-	}
-	return dashboard
+	return a.probeDashboardBalance(ctx, account, checkedAt)
 }
 
 func (a *application) getNewAPIStatus(ctx context.Context, account accountConfig) (map[string]any, int, error) {
 	target, err := balanceAPIURL(account.BaseURL, "/api/status")
 	if err != nil {
-		return nil, 0, err
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse}
+		return nil, 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	status, body, err := a.getUpstreamJSON(ctx, target, account.APIKey)
-	if err != nil || status < 200 || status >= 300 {
-		return nil, status, err
+	if err != nil {
+		failure := balanceFailureFor(balanceStageQuotaMetadata, status, err)
+		return nil, status, &balanceProbeError{failure: failure, cause: err}
+	}
+	if status < 200 || status >= 300 {
+		failure := balanceFailureFor(balanceStageQuotaMetadata, status, nil)
+		return nil, status, &balanceProbeError{failure: failure}
 	}
 	payload, ok := decodeJSONObject(body)
 	if !ok {
-		return nil, status, errors.New("invalid New API status response")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageQuotaMetadata, Code: balanceErrorInvalidResponse, Retryable: true}
+		return nil, status, &balanceProbeError{failure: failure}
 	}
 	return nestedObject(payload, "data"), status, nil
 }
@@ -2018,7 +2620,11 @@ func convertNewAPIQuota(amount float64, statusData map[string]any) (float64, str
 	if !hasPerUnit || perUnit <= 0 {
 		return 0, "", "", false
 	}
-	amount /= perUnit
+	return convertUSDToDisplay(amount/perUnit, statusData)
+}
+
+func convertUSDToDisplay(amount float64, statusData map[string]any) (float64, string, string, bool) {
+	unit := displayUnit(statusData["quota_display_type"])
 	switch unit {
 	case "USD":
 		return amount, unit, unit, true
@@ -2073,29 +2679,36 @@ func (a *application) probeNewAPIAccountQuota(ctx context.Context, account accou
 func (a *application) loginNewAPI(ctx context.Context, account accountConfig) (string, int, error) {
 	target, err := balanceAPIURL(account.BaseURL, "/api/user/login")
 	if err != nil {
-		return "", 0, err
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountLogin, Code: balanceErrorInvalidResponse}
+		return "", 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	body, _ := json.Marshal(map[string]string{"username": account.NewAPIUsername, "password": account.NewAPISecret})
 	status, responseBody, cookies, err := a.requestUpstreamJSON(ctx, http.MethodPost, target, body, nil)
 	if err != nil {
-		return "", 0, err
+		failure := balanceFailureFor(balanceStageAccountLogin, status, err)
+		return "", 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	if status < 200 || status >= 300 {
-		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return "", 0, errNewAPIAuthentication
+		failure := balanceFailureFor(balanceStageAccountLogin, status, nil)
+		var cause error
+		if failure.Status == balanceRefreshAuthError {
+			cause = errNewAPIAuthentication
 		}
-		return "", 0, errors.New("New API login failed")
+		return "", 0, &balanceProbeError{failure: failure, cause: cause}
 	}
 	payload, ok := decodeJSONObject(responseBody)
 	if !ok {
-		return "", 0, errors.New("invalid New API login response")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountLogin, Code: balanceErrorInvalidResponse, Retryable: true}
+		return "", 0, &balanceProbeError{failure: failure}
 	}
 	if success, exists := boolValue(payload["success"]); exists && !success {
-		return "", 0, errNewAPIAuthentication
+		failure := balanceFailure{Status: balanceRefreshAuthError, Stage: balanceStageAccountLogin, Code: balanceErrorAccountAuth}
+		return "", 0, &balanceProbeError{failure: failure, cause: errNewAPIAuthentication}
 	}
 	data := nestedObject(payload, "data")
 	if require2FA, _ := boolValue(data["require_2fa"]); require2FA {
-		return "", 0, errNewAPIAuthentication
+		failure := balanceFailure{Status: balanceRefreshAuthError, Stage: balanceStageAccountLogin, Code: balanceErrorTwoFactor}
+		return "", 0, &balanceProbeError{failure: failure, cause: errNewAPIAuthentication}
 	}
 	var userIDText string
 	switch value := data["id"].(type) {
@@ -2105,16 +2718,19 @@ func (a *application) loginNewAPI(ctx context.Context, account accountConfig) (s
 		userIDText = strings.TrimSpace(value)
 	}
 	if userIDText == "" {
-		return "", 0, errors.New("New API login response has no user ID")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountLogin, Code: balanceErrorInvalidResponse}
+		return "", 0, &balanceProbeError{failure: failure}
 	}
 	userIDValue, err := strconv.ParseInt(userIDText, 10, strconv.IntSize)
 	if err != nil || userIDValue < 1 {
-		return "", 0, errors.New("New API login response has no user ID")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountLogin, Code: balanceErrorInvalidResponse}
+		return "", 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	userID := int(userIDValue)
 	cookie := cookieHeader(cookies)
 	if cookie == "" {
-		return "", 0, errors.New("New API login response has no session cookie")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountLogin, Code: balanceErrorInvalidResponse}
+		return "", 0, &balanceProbeError{failure: failure}
 	}
 	return cookie, userID, nil
 }
@@ -2122,7 +2738,8 @@ func (a *application) loginNewAPI(ctx context.Context, account accountConfig) (s
 func (a *application) getNewAPIUserQuota(ctx context.Context, account accountConfig, cookie string, userID int) (float64, error) {
 	target, err := balanceAPIURL(account.BaseURL, "/api/user/self")
 	if err != nil {
-		return 0, err
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountQuota, Code: balanceErrorInvalidResponse}
+		return 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	headers := make(http.Header)
 	headers.Set("New-Api-User", strconv.Itoa(userID))
@@ -2133,24 +2750,37 @@ func (a *application) getNewAPIUserQuota(ctx context.Context, account accountCon
 	}
 	status, body, _, err := a.requestUpstreamJSON(ctx, http.MethodGet, target, nil, headers)
 	if err != nil {
-		return 0, err
+		failure := balanceFailureFor(balanceStageAccountQuota, status, err)
+		return 0, &balanceProbeError{failure: failure, cause: err}
 	}
 	if status < 200 || status >= 300 {
-		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return 0, errNewAPIAuthentication
+		failure := balanceFailureFor(balanceStageAccountQuota, status, nil)
+		var cause error
+		if failure.Status == balanceRefreshAuthError {
+			if cookie == "" {
+				failure.Code = accessTokenAuthErrorCode(body)
+			}
+			cause = errNewAPIAuthentication
 		}
-		return 0, errors.New("New API user balance request failed")
+		return 0, &balanceProbeError{failure: failure, cause: cause}
 	}
 	payload, ok := decodeJSONObject(body)
 	if !ok {
-		return 0, errors.New("invalid New API user balance response")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountQuota, Code: balanceErrorInvalidResponse, Retryable: true}
+		return 0, &balanceProbeError{failure: failure}
 	}
 	if success, exists := boolValue(payload["success"]); exists && !success {
-		return 0, errNewAPIAuthentication
+		code := balanceErrorAccountAuth
+		if cookie == "" {
+			code = accessTokenAuthErrorCode(body)
+		}
+		failure := balanceFailure{Status: balanceRefreshAuthError, Stage: balanceStageAccountQuota, Code: code}
+		return 0, &balanceProbeError{failure: failure, cause: errNewAPIAuthentication}
 	}
 	quota, ok := numberValue(nestedObject(payload, "data")["quota"])
 	if !ok {
-		return 0, errors.New("New API user balance is missing")
+		failure := balanceFailure{Status: balanceRefreshError, Stage: balanceStageAccountQuota, Code: balanceErrorMissingQuota}
+		return 0, &balanceProbeError{failure: failure}
 	}
 	return quota, nil
 }
@@ -2166,36 +2796,51 @@ func cookieHeader(cookies []*http.Cookie) string {
 }
 
 func (a *application) probeDashboardBalance(ctx context.Context, account accountConfig, checkedAt time.Time) balanceSnapshot {
-	result := balanceSnapshot{Status: "error", UpdatedAt: checkedAt}
+	result := balanceSnapshot{Status: balanceRefreshError, RefreshStatus: balanceRefreshError, CheckedAt: checkedAt}
 	subscriptionURL, err := joinUpstreamURL(account.BaseURL, "/dashboard/billing/subscription", "")
 	if err != nil {
+		result.ErrorStage = balanceStageDashboardSubscription
+		result.ErrorCode = balanceErrorInvalidResponse
 		return result
 	}
 	status, body, err := a.getUpstreamJSON(ctx, subscriptionURL, account.APIKey)
 	if err != nil {
+		failure := balanceFailureFor(balanceStageDashboardSubscription, status, err)
+		result.RefreshStatus = failure.Status
+		result.ErrorStage = failure.Stage
+		result.ErrorCode = failure.Code
+		result.Retryable = failure.Retryable
 		return result
 	}
 	if status == http.StatusNotFound {
-		result.Status = "unsupported"
+		result.Status = balanceRefreshUnsupported
+		result.RefreshStatus = balanceRefreshUnsupported
+		result.ErrorStage = balanceStageDashboardSubscription
+		result.ErrorCode = balanceErrorUnsupported
 		return result
 	}
 	if status < 200 || status >= 300 {
+		failure := balanceFailureFor(balanceStageDashboardSubscription, status, nil)
+		result.Status = failure.Status
+		result.RefreshStatus = failure.Status
+		result.ErrorStage = failure.Stage
+		result.ErrorCode = failure.Code
+		result.Retryable = failure.Retryable
 		return result
 	}
 	subscription, ok := decodeJSONObject(body)
 	if !ok {
+		result.ErrorStage = balanceStageDashboardSubscription
+		result.ErrorCode = balanceErrorInvalidResponse
+		result.Retryable = true
 		return result
 	}
 	subscriptionData := nestedObject(subscription, "data")
 	unlimited, _ := boolValue(subscriptionData["unlimited_quota"])
 	hardLimit, hasHardLimit := firstNumber(subscriptionData, "hard_limit_usd", "system_hard_limit_usd")
-	unit := ""
-	if hasHardLimit {
-		unit = "USD"
-	} else {
-		hardLimit, hasHardLimit = numberValue(subscriptionData["total_available"])
-	}
-	if !unlimited && !hasHardLimit {
+	if !hasHardLimit {
+		result.ErrorStage = balanceStageDashboardSubscription
+		result.ErrorCode = balanceErrorInvalidResponse
 		return result
 	}
 	now := a.now().UTC()
@@ -2204,21 +2849,40 @@ func (a *application) probeDashboardBalance(ctx context.Context, account account
 	query := url.Values{"start_date": []string{start}, "end_date": []string{end}}.Encode()
 	usageURL, err := joinUpstreamURL(account.BaseURL, "/dashboard/billing/usage", query)
 	if err != nil {
+		result.ErrorStage = balanceStageDashboardUsage
+		result.ErrorCode = balanceErrorInvalidResponse
 		return result
 	}
 	status, body, err = a.getUpstreamJSON(ctx, usageURL, account.APIKey)
 	if err != nil {
+		failure := balanceFailureFor(balanceStageDashboardUsage, status, err)
+		result.RefreshStatus = failure.Status
+		result.ErrorStage = failure.Stage
+		result.ErrorCode = failure.Code
+		result.Retryable = failure.Retryable
 		return result
 	}
 	if status == http.StatusNotFound {
-		result.Status = "unsupported"
+		result.Status = balanceRefreshUnsupported
+		result.RefreshStatus = balanceRefreshUnsupported
+		result.ErrorStage = balanceStageDashboardUsage
+		result.ErrorCode = balanceErrorUnsupported
 		return result
 	}
 	if status < 200 || status >= 300 {
+		failure := balanceFailureFor(balanceStageDashboardUsage, status, nil)
+		result.Status = failure.Status
+		result.RefreshStatus = failure.Status
+		result.ErrorStage = failure.Stage
+		result.ErrorCode = failure.Code
+		result.Retryable = failure.Retryable
 		return result
 	}
 	usage, ok := decodeJSONObject(body)
 	if !ok {
+		result.ErrorStage = balanceStageDashboardUsage
+		result.ErrorCode = balanceErrorInvalidResponse
+		result.Retryable = true
 		return result
 	}
 	usageData := nestedObject(usage, "data")
@@ -2229,16 +2893,17 @@ func (a *application) probeDashboardBalance(ctx context.Context, account account
 		totalUsage /= 100
 	}
 	if !hasUsage {
+		result.ErrorStage = balanceStageDashboardUsage
+		result.ErrorCode = balanceErrorInvalidResponse
 		return result
 	}
 	result.Status = "ok"
+	result.RefreshStatus = balanceRefreshOK
+	result.UpdatedAt = checkedAt
 	result.Unlimited = unlimited
 	result.Scope = balanceScopeTokenOnly
-	result.Unit = unit
-	result.DisplayLabel = unit
-	if result.DisplayLabel == "" {
-		result.DisplayLabel = "站点额度"
-	}
+	result.Unit = "USD"
+	result.DisplayLabel = "USD"
 	result.Amount = hardLimit - totalUsage
 	result.hardLimit = hardLimit
 	result.hasHardLimit = hasHardLimit
@@ -2285,6 +2950,27 @@ func decodeJSONObject(data []byte) (map[string]any, bool) {
 		return nil, false
 	}
 	return payload, true
+}
+
+func accessTokenAuthErrorCode(body []byte) string {
+	payload, ok := decodeJSONObject(body)
+	if !ok {
+		return balanceErrorAccessTokenAuth
+	}
+	message, _ := payload["message"].(string)
+	message = strings.ToLower(strings.TrimSpace(message))
+	mentionsUserID := strings.Contains(message, "new-api-user") || strings.Contains(message, "user id") ||
+		strings.Contains(message, "userid") || strings.Contains(message, "用户 id") || strings.Contains(message, "用户id")
+	switch {
+	case mentionsUserID && (strings.Contains(message, "not provided") || strings.Contains(message, "missing") ||
+		strings.Contains(message, "required") || strings.Contains(message, "未提供") || strings.Contains(message, "不能为空")):
+		return balanceErrorUserIDRequired
+	case mentionsUserID && (strings.Contains(message, "mismatch") || strings.Contains(message, "not match") ||
+		strings.Contains(message, "does not match") || strings.Contains(message, "不匹配") || strings.Contains(message, "不一致")):
+		return balanceErrorUserIDMismatch
+	default:
+		return balanceErrorAccessTokenAuth
+	}
 }
 
 func nestedObject(payload map[string]any, key string) map[string]any {
