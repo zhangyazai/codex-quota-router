@@ -986,7 +986,7 @@
             <div class="field">
               <label for="testModel">连通性测试模型</label>
               <input id="testModel" type="text" autocomplete="off" spellcheck="false" placeholder="例如 gpt-5" aria-describedby="testModelHelp">
-              <p class="helper" id="testModelHelp">仅用于“测试”按钮，不改变 Codex 实际请求中的模型。</p>
+              <p class="helper" id="testModelHelp">仅用于“测试模型连接”按钮，不影响独立余额查询，也不改变 Codex 实际请求中的模型。</p>
             </div>
           </div>
           <div>
@@ -1006,10 +1006,10 @@
           <div>
             <h2 id="accountsTitle">账号列表</h2>
             <p>列表顺序就是优先级顺序；最上方账号优先级最高。</p>
-            <p id="balanceRefreshResult">余额每 60 秒自动刷新（仅页面可见时）。</p>
+            <p id="balanceRefreshResult">余额每 60 秒自动刷新（仅页面可见时）；未保存的编辑内容不会参与全局刷新。</p>
           </div>
           <div class="toolbar">
-            <button class="secondary" id="refreshBalancesButton" type="button">刷新全部余额</button>
+            <button class="secondary" id="refreshBalancesButton" type="button">刷新已保存配置余额</button>
             <button class="primary" id="addAccountButton" type="button">添加账号</button>
           </div>
         </div>
@@ -1195,7 +1195,8 @@
           </div>
 
           <div class="card-actions" style="margin-top: 1rem;">
-            <button class="primary" type="button" data-action="test">测试当前填写内容</button>
+            <button class="primary" type="button" data-action="test-balance">查询当前填写余额</button>
+            <button class="secondary" type="button" data-action="test">测试模型连接</button>
             <button class="secondary" type="button" data-action="reset">恢复账号状态</button>
             <button class="danger-button" type="button" data-action="delete">删除账号</button>
           </div>
@@ -1223,7 +1224,7 @@
         priority: "从列表顶部开始选择第一个已启用且可用的账号；失败或冷却时继续向后尝试。",
         round_robin: "在可用账号之间依次轮换，让请求数量更均匀。",
         least_used: "优先选择本次服务启动以来已分配请求数最少的可用账号；服务重启后计数重新开始。",
-        highest_balance: "只有全部可用账号的实际余额都已验证、新鲜、可读取且单位可比较时才按余额选择；任一账号只有 Token 额度、余额未知、过期、获取失败或单位不同，都会整体回退到最少使用优先。"
+        highest_balance: "只有全部可用账号的实际余额都已验证、新鲜且单位可比较时才按余额选择；瞬时网络或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
       };
 
       var stateLabels = {
@@ -1254,6 +1255,47 @@
         pending: "正在刷新"
       };
 
+      var balanceErrorStageLabels = {
+        token_usage: "Token 额度接口",
+        token_quota: "Token 额度接口",
+        account_login: "用户登录",
+        account_auth: "用户认证",
+        account_quota: "用户余额接口",
+        quota_metadata: "站点额度设置",
+        status: "站点额度设置",
+        dashboard_subscription: "兼容账单订阅接口",
+        dashboard_usage: "兼容账单用量接口",
+        conversion: "额度换算",
+        status_conversion: "额度换算",
+        dashboard: "兼容账单接口",
+        account: "账号余额",
+        network: "网络请求",
+        timeout: "余额查询"
+      };
+
+      var balanceErrorCodeLabels = {
+        auth_failed: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
+        unauthorized: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
+        invalid_credentials: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
+        api_key_unauthorized: "API Key 无效或无权读取 Token 额度",
+        account_unauthorized: "用户认证失败，请检查用户名、密码、Access Token 与用户 ID",
+        access_token_unauthorized: "用户 Access Token 无效或已失效",
+        user_id_required: "上游要求提供 New API 用户 ID",
+        user_id_mismatch: "New API 用户 ID 与 Access Token 不匹配",
+        two_factor_required: "账号要求两步验证，请改用用户 Access Token",
+        timeout: "查询超时",
+        deadline_exceeded: "查询超时",
+        network_error: "网络连接失败",
+        rate_limited: "上游限流",
+        upstream_unavailable: "上游暂不可用",
+        upstream_rejected: "上游拒绝余额查询",
+        upstream_error: "上游接口返回错误",
+        invalid_response: "上游响应格式无效",
+        missing_quota: "上游响应缺少余额字段",
+        canceled: "查询已取消",
+        unsupported: "上游不支持此余额查询"
+      };
+
       var newAPIAuthModes = {
         api_key: true,
         password: true,
@@ -1275,7 +1317,10 @@
       var dirty = false;
       var pollTimer = 0;
       var balancePollTimer = 0;
-      var balanceRefreshInFlight = false;
+      var balanceRefreshPromise = null;
+      var balanceRetryAttempt = 0;
+      var balanceRetryAccountIds = [];
+      var balanceRetryDelays = [5000, 20000];
       var statusRefreshPromise = null;
       var balancePollInterval = 60000;
       var pageReady = false;
@@ -1586,7 +1631,8 @@
           edit: "编辑账号 " + name,
           "move-up": "上移账号 " + name + "，当前第 " + (index + 1) + " 位",
           "move-down": "下移账号 " + name + "，当前第 " + (index + 1) + " 位",
-          test: "测试账号 " + name + " 当前填写的内容",
+          "test-balance": "查询账号 " + name + " 当前填写内容的余额",
+          test: "测试账号 " + name + " 的模型连接",
           reset: "恢复账号 " + name + " 的运行状态",
           delete: "删除账号 " + name,
           "close-editor": (account.id ? "完成编辑账号 " : "完成添加账号 ") + name
@@ -1785,9 +1831,15 @@
           stateElement.title = isNewAccount
             ? "新账号尚未保存"
             : "URL、Key、余额认证或启用状态尚未保存；运行状态仍对应服务器中的旧配置";
-          card.querySelector('[data-slot="balance"]').textContent = isNewAccount ? "保存后获取" : "待保存后重新获取";
-          card.querySelector('[data-slot="requests"]').textContent = "—";
-          card.querySelector('[data-slot="last-used"]').textContent = "—";
+          card.querySelector('[data-slot="balance"]').textContent = isNewAccount
+            ? "保存后获取"
+            : formatBalance(accountStatus && accountStatus.balance) + "（服务器已保存配置）";
+          card.querySelector('[data-slot="requests"]').textContent = isNewAccount
+            ? "—"
+            : formatInteger(accountStatus && accountStatus.assignedRequests);
+          card.querySelector('[data-slot="last-used"]').textContent = isNewAccount
+            ? "—"
+            : formatDateTime(accountStatus && accountStatus.lastUsedAt, "尚未使用");
           card.querySelector('[data-slot="health"]').textContent = isNewAccount ? "尚未保存" : "当前运行状态对应旧配置";
           var pendingResetButton = card.querySelector('[data-action="reset"]');
           if (pendingResetButton) {
@@ -1824,21 +1876,88 @@
         }
       }
 
+      function balanceStatusValue(balance) {
+        if (!balance || typeof balance !== "object") {
+          return "unknown";
+        }
+        if (typeof balance.status === "string" && balance.status) {
+          return balance.status;
+        }
+        return typeof balance.state === "string" && balance.state ? balance.state : "unknown";
+      }
+
+      function balanceRefreshStatusValue(balance) {
+        if (!balance || typeof balance !== "object") {
+          return "";
+        }
+        return typeof balance.refreshStatus === "string" ? balance.refreshStatus : "";
+      }
+
+      function balanceStatusFailed(value) {
+        return value === "error" || value === "failed" || value === "unavailable" ||
+          value === "auth_error" || value === "timeout" || value === "partial" || value === "canceled";
+      }
+
+      function balanceErrorText(balance, retryScheduled) {
+        var state = balanceStatusValue(balance);
+        var refreshState = balanceRefreshStatusValue(balance);
+        var stage = typeof balance.errorStage === "string" ? balance.errorStage : "";
+        var code = typeof balance.errorCode === "string" ? balance.errorCode : "";
+        var stageLabel = balanceErrorStageLabels[stage] || "";
+        var detail = balanceErrorCodeLabels[code] || "";
+        if (!detail && (state === "auth_error" || stage === "account_auth" || stage === "account_login")) {
+          detail = balanceStateLabels.auth_error;
+        }
+        if (!detail && (state === "unsupported" || refreshState === "unsupported")) {
+          detail = balanceStateLabels.unsupported;
+        }
+        if (!detail && (state === "pending" || refreshState === "pending")) {
+          return balanceStateLabels.pending;
+        }
+        if (!detail && refreshState === "partial") {
+          detail = "部分余额来源查询失败";
+        }
+        if (!detail && balanceStatusFailed(refreshState)) {
+          detail = "余额刷新失败";
+        }
+        if (!detail) {
+          detail = balanceStateLabels[state] || "余额获取失败";
+        }
+        var result = stageLabel ? stageLabel + "：" + detail : detail;
+        if (retryScheduled !== false && balance.retryable === true && balanceStatusFailed(refreshState || state)) {
+          result += "，将自动重试";
+        }
+        return result;
+      }
+
+      function formatBalanceRefreshWarning(result, balance) {
+        var refreshState = balanceRefreshStatusValue(balance);
+        if (!balanceStatusFailed(refreshState)) {
+          return result;
+        }
+        if (refreshState === "partial" && (balance.scope === "token_only" || balance.scope === "account_only")) {
+          return result + "（本次仅取得部分余额来源：" + balanceErrorText(balance) + "）";
+        }
+        return result + "（最近刷新失败：" + balanceErrorText(balance) + "；显示上次成功结果）";
+      }
+
       function formatBalance(balance) {
         if (!balance || typeof balance !== "object") {
           return "未知（尚无数据）";
         }
-        var state = typeof balance.state === "string"
-          ? balance.state
-          : (typeof balance.status === "string" ? balance.status : "unknown");
+        var state = balanceStatusValue(balance);
+        var refreshState = balanceRefreshStatusValue(balance);
+        if (balanceStatusFailed(state) || ((state === "unknown" || state === "not_checked") && balanceStatusFailed(refreshState))) {
+          return balanceErrorText(balance);
+        }
         if (state === "unknown" || state === "not_checked" || state === "unsupported" || state === "unavailable" || state === "error" || state === "auth_error" || state === "pending") {
-          return balanceStateLabels[state] || "未知（不按 0 计算）";
+          return state === "unsupported" ? balanceErrorText(balance) : (balanceStateLabels[state] || "未知（不按 0 计算）");
         }
         if (balance.unlimited === true && balance.limitedBy !== "account") {
           if (balance.scope === "token_only") {
-            return "Token 无限（账号余额未验证）";
+            return formatBalanceRefreshWarning("Token 无限（账号余额未验证）", balance);
           }
-          return "无限" + (balance.displayLabel ? " · " + String(balance.displayLabel) : "");
+          return formatBalanceRefreshWarning("无限" + (balance.displayLabel ? " · " + String(balance.displayLabel) : ""), balance);
         }
         var amount = balance.remaining;
         if (amount === null || typeof amount === "undefined") {
@@ -1857,6 +1976,8 @@
         var result = unit ? remaining + " " + String(unit) : remaining;
         if (balance.scope === "token_only") {
           result += "（仅 Token 额度，账号余额未验证）";
+        } else if (balance.scope === "account_only") {
+          result += "（仅账号余额，Token 额度未验证）";
         } else if (balance.limitedBy === "account") {
           result += "（账号余额限制）";
         } else if (balance.limitedBy === "token") {
@@ -1865,7 +1986,7 @@
         if (balance.fresh === false && balance.updatedAt) {
           result += "（已过期）";
         }
-        return result;
+        return formatBalanceRefreshWarning(result, balance);
       }
 
       function formatInteger(value) {
@@ -1991,6 +2112,7 @@
         var card = findCard(accountUIID(account));
         var firstInvalid = null;
         var requireKey = options && options.requireKey === true;
+        var validateBalanceAuth = !(options && options.skipNewAPIAuth === true);
         if (card) {
           clearFieldErrors(card);
         }
@@ -2020,12 +2142,12 @@
           firstInvalid = firstInvalid || (card && card.querySelector('[data-field="apiKey"]'));
         }
 
-        if (!newAPIAuthModes[account.newApiAuthMode]) {
+        if (validateBalanceAuth && !newAPIAuthModes[account.newApiAuthMode]) {
           if (card) {
             setFieldError(card, "newApiAuthMode", "请选择有效的 New API 余额认证方式");
           }
           firstInvalid = firstInvalid || (card && card.querySelector('[data-field="newApiAuthMode"]'));
-        } else if (account.newApiAuthMode === "password" || account.newApiAuthMode === "access_token") {
+        } else if (validateBalanceAuth && (account.newApiAuthMode === "password" || account.newApiAuthMode === "access_token")) {
           if (account.newApiAuthMode === "password" && !account.newApiUsername.trim()) {
             if (card) {
               setFieldError(card, "newApiUsername", "请填写 New API 登录用户名");
@@ -2230,7 +2352,7 @@
       }
 
       function refreshStatus(silent) {
-        if (!pageReady || pageBusy || balanceRefreshInFlight) {
+        if (!pageReady || pageBusy || balanceRefreshPromise) {
           return Promise.resolve();
         }
         if (statusRefreshPromise) {
@@ -2302,7 +2424,81 @@
           showGlobalError(failure);
           announce("保存失败");
         } else {
-          announce(outcome);
+          setTextIfChanged(elements.balanceRefreshResult, outcome + "，正在查询余额…");
+          announce(outcome + "，正在查询余额");
+          await refreshBalances({ trigger: "save" });
+        }
+      }
+
+      async function testAccountBalance(account, button) {
+        clearGlobalError();
+        var firstInvalid = validateAccount(account, { requireKey: true });
+        if (firstInvalid) {
+          firstInvalid.focus();
+          announce("请先修正 " + (account.name || "该账号") + " 的配置");
+          return;
+        }
+
+        var urls = httpURLs([account]);
+        var confirmed = await confirmHTTPRisk(urls);
+        if (!confirmed) {
+          announce("已取消余额查询");
+          return;
+        }
+
+        var card = findCard(accountUIID(account));
+        var resultElement = card && card.querySelector('[data-slot="test-result"]');
+        var restoreButton = setButtonBusy(button, "正在查询…");
+        if (resultElement) {
+          resultElement.className = "test-result";
+          resultElement.textContent = "正在查询当前填写内容对应的余额…";
+        }
+
+        try {
+          var data = await api("/admin/balances/test", {
+            method: "POST",
+            body: JSON.stringify({
+              accountId: account.id,
+              candidate: candidatePayload(account),
+              allowInsecureHttp: urls.length > 0
+            })
+          });
+          var report = data.report && typeof data.report === "object"
+            ? data.report
+            : (Array.isArray(data.reports) && data.reports[0] && typeof data.reports[0] === "object" ? data.reports[0] : {});
+          var reportBalance = report.balance && typeof report.balance === "object" ? report.balance : {};
+          var responseBalance = data.balance && typeof data.balance === "object" ? data.balance : {};
+          var balance = Object.assign({}, report, reportBalance, responseBalance);
+          var refreshState = balanceRefreshStatusValue(balance);
+          var partial = refreshState === "partial" && data.ok !== false;
+          var failed = data.ok === false || (!partial && (balanceStatusFailed(balanceStatusValue(balance)) || balanceStatusFailed(refreshState)));
+          var displayBalance = Object.assign({}, balance, { retryable: false });
+          var message = partial
+            ? "余额查询部分成功：" + formatBalance(displayBalance)
+            : (failed ? "余额查询失败：" + balanceErrorText(balance, false) : "余额查询成功：" + formatBalance(displayBalance));
+          if (resultElement) {
+            resultElement.className = failed ? "test-result danger" : "test-result success";
+            resultElement.textContent = message;
+          }
+          announce((account.name || "该账号") + "：" + message);
+          if (account.id && !accountRuntimeConfigChanged(account)) {
+            await refreshStatus(true);
+          }
+        } catch (error) {
+          var errorData = error.data && typeof error.data === "object" ? error.data : {};
+          var errorReport = errorData.report && typeof errorData.report === "object"
+            ? errorData.report
+            : (Array.isArray(errorData.reports) && errorData.reports[0] && typeof errorData.reports[0] === "object" ? errorData.reports[0] : errorData);
+          var failure = "余额查询失败：" + (errorReport.errorCode || errorReport.errorStage
+            ? balanceErrorText(errorReport, false)
+            : error.message);
+          if (resultElement) {
+            resultElement.className = "test-result danger";
+            resultElement.textContent = failure;
+          }
+          announce((account.name || "该账号") + " " + failure);
+        } finally {
+          restoreButton();
         }
       }
 
@@ -2317,7 +2513,7 @@
           announce("请先填写连通性测试模型");
           return;
         }
-        var firstInvalid = validateAccount(account, { requireKey: true });
+        var firstInvalid = validateAccount(account, { requireKey: true, skipNewAPIAuth: true });
         if (firstInvalid) {
           firstInvalid.focus();
           announce("请先修正 " + (account.name || "该账号") + " 的配置");
@@ -2359,9 +2555,6 @@
           }
           if (data.message) {
             pieces.push(String(data.message));
-          }
-          if (data.balance) {
-            pieces.push("余额：" + formatBalance(data.balance));
           }
           var message = pieces.join(" · ");
           if (resultElement) {
@@ -2441,8 +2634,110 @@
         return null;
       }
 
+      function balanceReportView(report) {
+        var source = report && typeof report === "object" ? report : {};
+        var balance = source.balance && typeof source.balance === "object" ? source.balance : {};
+        return Object.assign({}, source, balance);
+      }
+
+      function balanceReportState(report) {
+        var view = balanceReportView(report);
+        var state = balanceStatusValue(view);
+        if (balanceStatusFailed(state) || state === "unsupported") {
+          return state;
+        }
+        var refreshState = balanceRefreshStatusValue(view);
+        return refreshState || state;
+      }
+
+      function balanceReportFailed(report) {
+        return balanceStatusFailed(balanceReportState(report));
+      }
+
+      function balanceReports(data) {
+        var payload = data && typeof data === "object" ? data : {};
+        if (Array.isArray(payload.reports)) return payload.reports;
+        if (Array.isArray(payload.results)) return payload.results;
+        if (!payload.status || !Array.isArray(payload.status.accounts)) {
+          return [];
+        }
+        return payload.status.accounts.map(function (account) {
+          var balance = account && account.balance && typeof account.balance === "object" ? account.balance : {};
+          return Object.assign({
+            accountId: account && account.id,
+            accountName: account && account.name
+          }, balance);
+        });
+      }
+
+      function balanceReportName(report) {
+        var source = report && typeof report === "object" ? report : {};
+        if (typeof source.accountName === "string" && source.accountName.trim()) {
+          return source.accountName.trim();
+        }
+        if (typeof source.name === "string" && source.name.trim()) {
+          return source.name.trim();
+        }
+        var id = source.accountId == null ? source.id : source.accountId;
+        var account = id == null ? null : getAccount(String(id));
+        return account && account.name.trim() ? account.name.trim() : "未命名账号";
+      }
+
+      function hasRetryableBalanceFailure(data) {
+        return balanceReports(data).some(function (report) {
+          return balanceReportFailed(report) && balanceReportView(report).retryable === true;
+        });
+      }
+
+      function retryableBalanceAccountIds(data) {
+        var seen = Object.create(null);
+        return balanceReports(data).reduce(function (ids, report) {
+          var view = balanceReportView(report);
+          var id = report && report.accountId != null ? report.accountId : view.accountId;
+          id = id == null ? "" : String(id).trim();
+          if (id && !seen[id] && balanceReportFailed(report) && view.retryable === true) {
+            seen[id] = true;
+            ids.push(id);
+          }
+          return ids;
+        }, []);
+      }
+
       function balanceRefreshMessage(data) {
         var payload = data && typeof data === "object" ? data : {};
+        var reports = balanceReports(payload);
+        if (reports.length) {
+          var reportCounts = { success: 0, partial: 0, failed: 0, unsupported: 0, skipped: 0 };
+          var failures = [];
+          reports.forEach(function (report) {
+            var state = balanceReportState(report);
+            if (state === "ok" || state === "success" || state === "succeeded" || state === "known" || state === "refreshed") {
+              reportCounts.success += 1;
+            } else if (state === "partial") {
+              reportCounts.partial += 1;
+              failures.push(report);
+            } else if (state === "unsupported") {
+              reportCounts.unsupported += 1;
+            } else if (balanceReportFailed(report)) {
+              reportCounts.failed += 1;
+              failures.push(report);
+            } else {
+              reportCounts.skipped += 1;
+            }
+          });
+          var reportPieces = ["成功 " + reportCounts.success, "失败 " + reportCounts.failed];
+          if (reportCounts.partial > 0) reportPieces.push("部分成功 " + reportCounts.partial);
+          if (reportCounts.unsupported > 0) reportPieces.push("不支持 " + reportCounts.unsupported);
+          if (reportCounts.skipped > 0) reportPieces.push("未检查 " + reportCounts.skipped);
+          var reportMessage = "余额刷新完成：" + reportPieces.join("，") + "。";
+          if (failures.length) {
+            var failureDetails = failures.slice(0, 3).map(function (report) {
+              return balanceReportName(report) + "（" + balanceErrorText(balanceReportView(report)) + "）";
+            });
+            reportMessage += " 失败账号：" + failureDetails.join("；") + (failures.length > 3 ? "；另有 " + (failures.length - 3) + " 个" : "") + "。";
+          }
+          return reportMessage;
+        }
         if (typeof payload.summary === "string" && payload.summary.trim()) {
           return payload.summary.trim();
         }
@@ -2517,14 +2812,28 @@
         }, 15000);
       }
 
-      function scheduleBalancePoll(delay) {
+      function scheduleBalancePoll(delay, trigger) {
         stopBalancePoll();
         if (!pageReady || document.hidden) {
           return;
         }
         balancePollTimer = window.setTimeout(function () {
-          refreshBalances({ automatic: true });
+          refreshBalances({ trigger: trigger || "poll" });
         }, typeof delay === "number" ? delay : balancePollInterval);
+      }
+
+      function balanceRetryPlan(retryable) {
+        if (retryable && balanceRetryAttempt < balanceRetryDelays.length) {
+          var delay = balanceRetryDelays[balanceRetryAttempt];
+          balanceRetryAttempt += 1;
+          return {
+            delay: delay,
+            trigger: "retry",
+            notice: " 将在 " + Math.round(delay / 1000) + " 秒后自动重试。"
+          };
+        }
+        balanceRetryAttempt = 0;
+        return { delay: balancePollInterval, trigger: "poll", notice: "" };
       }
 
       function balanceRefreshTime() {
@@ -2536,55 +2845,84 @@
       }
 
       async function refreshBalances(options) {
-        var automatic = options && options.automatic === true;
-        if (balanceRefreshInFlight) {
-          return;
+        var trigger = options && typeof options.trigger === "string" ? options.trigger : "manual";
+        var quiet = trigger === "poll" || trigger === "retry";
+        if (balanceRefreshPromise) {
+          if (quiet) {
+            return balanceRefreshPromise;
+          }
+          await balanceRefreshPromise;
         }
         if (!pageReady || pageBusy) {
-          scheduleBalancePoll();
+          scheduleBalancePoll(trigger === "retry" ? balanceRetryDelays[0] : balancePollInterval, trigger === "retry" ? "retry" : "poll");
           return;
         }
-        balanceRefreshInFlight = true;
-        if (!automatic) {
+        stopBalancePoll();
+        if (!quiet) {
           clearGlobalError();
         }
-        var restoreButton = setButtonBusy(elements.refreshBalancesButton, automatic ? "自动刷新中…" : "正在刷新…");
-        if (!automatic) {
-          setTextIfChanged(elements.balanceRefreshResult, "正在刷新全部账号余额…");
+        var busyText = trigger === "save" ? "保存后刷新中…" : (trigger === "retry" ? "自动重试中…" : (trigger === "poll" ? "自动刷新中…" : "正在刷新…"));
+        var restoreButton = setButtonBusy(elements.refreshBalancesButton, busyText);
+        if (trigger === "manual") {
+          setTextIfChanged(elements.balanceRefreshResult, dirty
+            ? "正在刷新服务器已保存配置的余额；未保存编辑不会参与本次刷新…"
+            : "正在刷新已保存配置的余额…");
         }
-        try {
-          if (statusRefreshPromise) {
-            await statusRefreshPromise;
-          }
-          var data = await api("/admin/balances/refresh" + (automatic ? "?automatic=1" : ""), {
-            method: "POST",
-            body: JSON.stringify({})
-          });
-          if (data.status) {
-            status = normalizeStatus(data.status);
-            updateStatusUI();
-          } else {
-            await refreshStatus(true);
-          }
-          var message = balanceRefreshMessage(data);
-          if (automatic) {
-            setTextIfChanged(elements.balanceRefreshResult, "最近自动刷新 " + balanceRefreshTime() + "。" + message);
-          } else {
-            setTextIfChanged(elements.balanceRefreshResult, message);
-            announce(message);
-          }
-        } catch (error) {
-          var failure = "刷新余额失败：" + error.message;
-          if (automatic) {
-            setTextIfChanged(elements.balanceRefreshResult, "自动刷新失败，将在下一轮重试。" + error.message);
-          } else {
+        var nextPlan = { delay: balancePollInterval, trigger: "poll", notice: "" };
+        var task = (async function () {
+          try {
+            if (statusRefreshPromise) {
+              await statusRefreshPromise;
+            }
+            var refreshRequest = {};
+            if (trigger === "retry" && balanceRetryAccountIds.length) {
+              refreshRequest.accountIds = balanceRetryAccountIds.slice();
+            }
+            var data = await api("/admin/balances/refresh" + (trigger === "poll" ? "?automatic=1" : ""), {
+              method: "POST",
+              body: JSON.stringify(refreshRequest)
+            });
+            if (data.status) {
+              status = normalizeStatus(data.status);
+              updateStatusUI();
+            } else {
+              await refreshStatus(true);
+            }
+            balanceRetryAccountIds = retryableBalanceAccountIds(data);
+            nextPlan = balanceRetryPlan(balanceRetryAccountIds.length > 0 || hasRetryableBalanceFailure(data));
+            var message = balanceRefreshMessage(data) + nextPlan.notice;
+            if (trigger === "poll") {
+              setTextIfChanged(elements.balanceRefreshResult, "最近自动刷新 " + balanceRefreshTime() + "。" + message);
+            } else if (trigger === "retry") {
+              setTextIfChanged(elements.balanceRefreshResult, "最近自动重试 " + balanceRefreshTime() + "。" + message);
+            } else {
+              setTextIfChanged(elements.balanceRefreshResult, message);
+              announce(message);
+            }
+            return data;
+          } catch (error) {
+            if (trigger !== "retry") {
+              balanceRetryAccountIds = [];
+            }
+            nextPlan = balanceRetryPlan(true);
+            var failure = "刷新余额请求失败：" + error.message + nextPlan.notice;
             setTextIfChanged(elements.balanceRefreshResult, failure);
-            showGlobalError(failure);
+            if (!quiet) {
+              showGlobalError(failure);
+              announce("余额刷新失败");
+            }
+            return null;
           }
+        }());
+        balanceRefreshPromise = task;
+        try {
+          return await task;
         } finally {
-          balanceRefreshInFlight = false;
+          if (balanceRefreshPromise === task) {
+            balanceRefreshPromise = null;
+          }
           restoreButton();
-          scheduleBalancePoll();
+          scheduleBalancePoll(nextPlan.delay, nextPlan.trigger);
         }
       }
 
@@ -2795,6 +3133,8 @@
           moveAccount(account, 1, "move-down");
         } else if (action === "delete") {
           deleteAccount(account);
+        } else if (action === "test-balance") {
+          testAccountBalance(account, button);
         } else if (action === "test") {
           testAccount(account, button);
         } else if (action === "reset") {
@@ -2893,7 +3233,7 @@
       elements.addAccountButton.addEventListener("click", addAccount);
       elements.emptyAddButton.addEventListener("click", addAccount);
       elements.refreshBalancesButton.addEventListener("click", function () {
-        refreshBalances({ manual: true });
+        refreshBalances({ trigger: "manual" });
       });
       elements.saveButton.addEventListener("click", saveAll);
       elements.rotateGatewayTokenButton.addEventListener("click", rotateGatewayToken);
@@ -2905,7 +3245,7 @@
         }
         loadBootstrap({ announce: true }).then(function () {
           if (pageReady && !document.hidden) {
-            refreshBalances({ automatic: true });
+            refreshBalances({ trigger: "poll" });
           }
         });
       });
@@ -2923,14 +3263,14 @@
           stopBalancePoll();
           setTextIfChanged(elements.balanceRefreshResult, "余额自动刷新已暂停；返回页面后继续。");
         } else {
-          refreshBalances({ automatic: true });
+          refreshBalances({ trigger: "poll" });
         }
       });
 
       updatePageInteractivity();
       loadBootstrap().then(function () {
         if (pageReady && !document.hidden) {
-          refreshBalances({ automatic: true });
+          refreshBalances({ trigger: "poll" });
         }
       });
       startStatusPoll();
@@ -2946,7 +3286,7 @@
       window.addEventListener("pageshow", function (event) {
         if (event.persisted && pageReady && !document.hidden) {
           startStatusPoll();
-          refreshBalances({ automatic: true });
+          refreshBalances({ trigger: "poll" });
         }
       });
     }());
