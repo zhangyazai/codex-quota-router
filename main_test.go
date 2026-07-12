@@ -36,7 +36,10 @@ func TestHealthAndEmbeddedPageExposeAutoRefreshRelease(t *testing.T) {
 	app.routes().ServeHTTP(indexResponse, indexRequest)
 	body := indexResponse.Body.String()
 	if indexResponse.Code != http.StatusOK || !strings.Contains(body, "balancePollInterval = 60000") ||
-		!strings.Contains(body, "?automatic=1") {
+		!strings.Contains(body, "?automatic=1") || !strings.Contains(body, "<dt>可参与路由账号</dt>") ||
+		!strings.Contains(body, `available: "可参与路由"`) || !strings.Contains(body, `recent_success: "近期成功"`) ||
+		!strings.Contains(body, `recent_failure: "最近失败"`) ||
+		!strings.Contains(body, "曾成功响应（历史记录），当前状态待验证") {
 		t.Fatalf("embedded auto-refresh page missing: status=%d", indexResponse.Code)
 	}
 }
@@ -170,6 +173,42 @@ func TestStrategies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRuntimeHealthStateDoesNotBlockRouting(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	account.Verified = true
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+
+	status := app.status()
+	if status.AvailableAccounts != 1 || status.Accounts[0].State != "available" ||
+		status.Accounts[0].HealthState != accountHealthUnverified || !status.Accounts[0].Verified {
+		t.Fatalf("historical verification was shown as current health: %#v", status)
+	}
+	selected, ok := app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || selected.ID != "a" {
+		t.Fatalf("unverified account was not routable: selected=%q ok=%v", selected.ID, ok)
+	}
+
+	app.markAccountVerified(selected)
+	status = app.status()
+	if status.Accounts[0].HealthState != accountHealthRecentSuccess {
+		t.Fatalf("successful account health=%q, want recent success", status.Accounts[0].HealthState)
+	}
+
+	now = now.Add(accountHealthTTL + time.Second)
+	if health := app.status().Accounts[0].HealthState; health != accountHealthUnverified {
+		t.Fatalf("stale success health=%q, want unverified", health)
+	}
+	app.markAccountHealthFailure(selected)
+	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
+		t.Fatalf("failed account health=%q, want recent failure", health)
+	}
+	selected, ok = app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || selected.ID != "a" {
+		t.Fatalf("failed health prevented recovery routing: selected=%q ok=%v", selected.ID, ok)
 	}
 }
 
@@ -466,6 +505,9 @@ func TestNetworkAnd5xxAreNeverReplayed(t *testing.T) {
 			if response.Code != test.wantStatus || secondCalls.Load() != 0 {
 				t.Fatalf("response=%d secondCalls=%d", response.Code, secondCalls.Load())
 			}
+			if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
+				t.Fatalf("failed upstream health=%q, want recent failure", health)
+			}
 		})
 	}
 }
@@ -502,6 +544,55 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 	if strings.Contains(logs.String(), "data: partial") || !strings.Contains(logs.String(), "terminal=upstream_read_error") {
 		t.Fatalf("unsafe or incomplete stream log: %s", logs.String())
 	}
+	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
+		t.Fatalf("truncated upstream stream health=%q, want recent failure", health)
+	}
+}
+
+func TestCanceledRequestsDoNotChangeHealth(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	newApp := func(t *testing.T) *application {
+		t.Helper()
+		account := testAccount("a", "https://a.invalid/v1", "key-a")
+		account.Verified = true
+		app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+		app.runtime["a"].HealthState = accountHealthRecentSuccess
+		app.runtime["a"].HealthCheckedAt = now
+		return app
+	}
+
+	t.Run("proxy", func(t *testing.T) {
+		app := newApp(t)
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/v1/responses", strings.NewReader(`{}`))
+		request.Host = listenAddress
+		request.Header.Set("Authorization", "Bearer gateway-token")
+		request.Header.Set("Content-Type", "application/json")
+		ctx, cancel := context.WithCancel(request.Context())
+		cancel()
+		app.routes().ServeHTTP(httptest.NewRecorder(), request.WithContext(ctx))
+		if health := app.status().Accounts[0].HealthState; health != accountHealthRecentSuccess {
+			t.Fatalf("canceled proxy changed health to %q", health)
+		}
+	})
+
+	t.Run("admin test", func(t *testing.T) {
+		app := newApp(t)
+		body, err := json.Marshal(testRequest{AccountID: "a", TestModel: "test-model", AllowInsecureHTTP: boolPointer(true)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/admin/test", bytes.NewReader(body))
+		request.Host = listenAddress
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://127.0.0.1:4000")
+		request.Header.Set("X-CSRF-Token", app.csrfToken)
+		ctx, cancel := context.WithCancel(request.Context())
+		cancel()
+		app.routes().ServeHTTP(httptest.NewRecorder(), request.WithContext(ctx))
+		if health := app.status().Accounts[0].HealthState; health != accountHealthRecentSuccess {
+			t.Fatalf("canceled admin test changed health to %q", health)
+		}
+	})
 }
 
 func TestAdminSaveKeepsExistingKeysGeneratesIDsAndRedacts(t *testing.T) {
@@ -2005,6 +2096,7 @@ func TestPreparedRouteRefreshIgnoresLaterBackoff(t *testing.T) {
 
 func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T) {
 	var balanceCalls atomic.Int32
+	var savedTestStatus atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer saved-key" {
 			t.Fatalf("wrong authorization: %q", r.Header.Get("Authorization"))
@@ -2012,6 +2104,11 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/responses":
+			if status := savedTestStatus.Load(); status != 0 {
+				w.WriteHeader(int(status))
+				_, _ = io.WriteString(w, `{"error":{"message":"test failed"}}`)
+				return
+			}
 			_, _ = io.WriteString(w, `{}`)
 		case "/api/usage/token/":
 			balanceCalls.Add(1)
@@ -2039,6 +2136,9 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 	if !app.cfg.Accounts[0].Verified || app.cfg.Accounts[0].BlockedReason != "" {
 		t.Fatalf("matching test did not clear state: %#v", app.cfg.Accounts[0])
 	}
+	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentSuccess {
+		t.Fatalf("matching test health=%q, want recent success", health)
+	}
 	request.Candidate = &accountInput{BaseURL: server.URL + "/v1", NewAPIAuthMode: newAPIAuthPassword}
 	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) || balanceCalls.Load() != 0 {
@@ -2047,8 +2147,15 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 	}
 
 	app.cfg.Accounts[0].Verified = false
+	app.runtime["a"].HealthState = ""
+	app.runtime["a"].HealthCheckedAt = time.Time{}
+	var candidateFails atomic.Bool
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/responses" {
+			if candidateFails.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			_, _ = io.WriteString(w, `{}`)
 			return
 		}
@@ -2057,8 +2164,36 @@ func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T)
 	defer other.Close()
 	request.Candidate = &accountInput{BaseURL: other.URL + "/v1", APIKey: "other-key"}
 	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || app.cfg.Accounts[0].Verified {
+	if response.Code != http.StatusOK || app.cfg.Accounts[0].Verified ||
+		app.status().Accounts[0].HealthState != accountHealthUnverified {
 		t.Fatalf("unsaved candidate changed saved verification: status=%d account=%#v", response.Code, app.cfg.Accounts[0])
+	}
+	candidateFails.Store(true)
+	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":false`) ||
+		app.status().Accounts[0].HealthState != accountHealthUnverified {
+		t.Fatalf("failing unsaved candidate changed saved health: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	savedTestStatus.Store(http.StatusServiceUnavailable)
+	request.Candidate = nil
+	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":false`) ||
+		app.status().Accounts[0].HealthState != accountHealthRecentFailure {
+		t.Fatalf("failing saved test did not update health: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	app.runtime["a"].HealthState = accountHealthRecentSuccess
+	app.runtime["a"].HealthCheckedAt = time.Now()
+	app.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body:       &oneChunkThenError{chunk: []byte(`{}`)}, Request: request,
+		}, nil
+	})}
+	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
+	if response.Code != http.StatusBadGateway || app.status().Accounts[0].HealthState != accountHealthRecentFailure {
+		t.Fatalf("truncated saved test did not update health: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -2080,10 +2215,13 @@ func TestAccountResetClearsBlockAndRefreshesBalance(t *testing.T) {
 	account := testAccount("a", server.URL+"/v1", "key-a")
 	account.BlockedReason = "quota"
 	app := newTestApplication(t, strategyPriority, time.Now, account)
+	app.runtime["a"].HealthState = accountHealthRecentFailure
+	app.runtime["a"].HealthCheckedAt = time.Now()
 	staleRequestAccount := app.cfg.Accounts[0]
 	response := adminJSON(app, http.MethodPost, "/admin/accounts/reset", map[string]string{"id": "a"}, "http://127.0.0.1:4000")
 	if response.Code != http.StatusOK || app.cfg.Accounts[0].BlockedReason != "" || balanceCalls.Load() != 1 ||
-		app.runtime["a"].Balance.Status != "ok" || app.cfg.Accounts[0].Revision != staleRequestAccount.Revision+1 {
+		app.runtime["a"].Balance.Status != "ok" || app.cfg.Accounts[0].Revision != staleRequestAccount.Revision+1 ||
+		app.status().Accounts[0].HealthState != accountHealthUnverified {
 		t.Fatalf("reset failed: status=%d account=%#v runtime=%#v calls=%d body=%s",
 			response.Code, app.cfg.Accounts[0], app.runtime["a"], balanceCalls.Load(), response.Body.String())
 	}

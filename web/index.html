@@ -950,7 +950,7 @@
         <dd id="summaryStrategy">—</dd>
       </div>
       <div class="summary-item">
-        <dt>可用账号</dt>
+        <dt>可参与路由账号</dt>
         <dd id="summaryAccounts">—</dd>
       </div>
       <div class="summary-item">
@@ -967,7 +967,7 @@
       <div class="panel-head">
         <div>
           <h2 id="strategyTitle">路由规则</h2>
-          <p>规则应用于所有已启用且当前可用的账号。</p>
+          <p>规则应用于所有当前可参与路由的账号；该状态不代表模型请求已实时验证。</p>
         </div>
       </div>
       <div class="panel-body">
@@ -1100,7 +1100,7 @@
           <dd data-slot="last-used">尚未使用</dd>
         </div>
         <div>
-          <dt>验证 / 冷却</dt>
+          <dt>近期连通性 / 冷却</dt>
           <dd data-slot="health">待验证</dd>
         </div>
       </dl>
@@ -1221,15 +1221,17 @@
       };
 
       var strategyDescriptions = {
-        priority: "从列表顶部开始选择第一个已启用且可用的账号；失败或冷却时继续向后尝试。",
-        round_robin: "在可用账号之间依次轮换，让请求数量更均匀。",
-        least_used: "优先选择本次服务启动以来已分配请求数最少的可用账号；服务重启后计数重新开始。",
-        highest_balance: "只有全部可用账号的实际余额都已验证、新鲜且单位可比较时才按余额选择；瞬时网络或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
+        priority: "从列表顶部开始选择第一个可参与路由的账号；失败或冷却时继续向后尝试。",
+        round_robin: "在可参与路由的账号之间依次轮换，让请求数量更均匀。",
+        least_used: "优先选择本次服务启动以来已分配请求数最少的路由候选；服务重启后计数重新开始。",
+        highest_balance: "只有全部路由候选的实际余额都已验证、新鲜且单位可比较时才按余额选择；瞬时网络或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
       };
 
       var stateLabels = {
-        available: "可用",
-        ready: "可用",
+        available: "可参与路由",
+        recent_success: "近期成功",
+        recent_failure: "最近失败",
+        ready: "可参与路由",
         active: "正在使用",
         cooldown: "冷却中",
         cooling_down: "冷却中",
@@ -1303,9 +1305,9 @@
       };
 
       var fallbackReasonLabels = {
-        balance_stale: "部分可用账号的余额数据已过期",
-        balance_unavailable: "部分可用账号的余额未知或不可用",
-        balance_account_unverified: "部分可用账号只有 Token 额度，尚未验证账号余额",
+        balance_stale: "部分路由候选的余额数据已过期",
+        balance_unavailable: "部分路由候选的余额未知或不可用",
+        balance_account_unverified: "部分路由候选只有 Token 额度，尚未验证账号余额",
         balance_unit_unknown: "部分余额缺少可比较的单位",
         balance_unit_mismatch: "账号余额单位不同，无法直接比较"
       };
@@ -1851,18 +1853,24 @@
 
         if (account.enabled && accountStatus && typeof accountStatus.state === "string") {
           state = accountStatus.state;
+          if (state === "available" && typeof accountStatus.healthState === "string" && stateLabels[accountStatus.healthState]) {
+            state = accountStatus.healthState;
+          }
         }
 
         stateElement.textContent = stateLabels[state] || state || "状态未知";
         stateElement.className = "tag";
-        if (state === "available" || state === "ready" || state === "active") {
+        if (state === "recent_success" || state === "active") {
           stateElement.classList.add("success");
         } else if (state === "cooldown" || state === "cooling_down" || state === "unverified" || state === "unknown" || state === "incomplete") {
           stateElement.classList.add("warning");
-        } else if (state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
+        } else if (state === "recent_failure" || state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
           stateElement.classList.add("danger");
         }
-        stateElement.title = "服务端状态：" + (state || "unknown");
+        stateElement.title = accountStatus
+          ? "路由状态：" + (stateLabels[accountStatus.state] || accountStatus.state || "状态未知") +
+            "；近期连通性：" + (stateLabels[accountStatus.healthState] || accountStatus.healthState || "待验证")
+          : "服务端状态：" + (state || "unknown");
 
         card.querySelector('[data-slot="balance"]').textContent = formatBalance(accountStatus && accountStatus.balance);
         card.querySelector('[data-slot="requests"]').textContent = formatInteger(accountStatus && accountStatus.assignedRequests);
@@ -1872,7 +1880,7 @@
         var resetButton = card.querySelector('[data-action="reset"]');
         if (resetButton) {
           resetButton.disabled = !accountStatus;
-          resetButton.title = accountStatus ? "清除该账号的耗尽、不可用或冷却状态" : "此账号尚未保存";
+          resetButton.title = accountStatus ? "清除该账号的阻止、冷却或近期连通性状态" : "此账号尚未保存";
         }
       }
 
@@ -2026,7 +2034,16 @@
           };
           return "已阻止：" + (blockedLabels[accountStatus.blockedReason] || String(accountStatus.blockedReason));
         }
-        return accountStatus.verified ? "已验证" : "待验证";
+        if (accountStatus.healthState === "recent_success") {
+          return "近期验证通过";
+        }
+        if (accountStatus.healthState === "recent_failure") {
+          return "最近请求或测试失败";
+        }
+        if (accountStatus.healthState === "unverified") {
+          return accountStatus.verified ? "曾成功响应（历史记录），当前状态待验证" : "当前状态待验证";
+        }
+        return accountStatus.verified ? "曾成功响应（历史记录）" : "当前状态待验证";
       }
 
       function updateStatusUI() {
@@ -2044,7 +2061,7 @@
           effectiveText += " 页面中选择的“" + (strategyLabels[selected] || selected) + "”尚未保存。";
         }
         if (configured === "highest_balance" || selected === "highest_balance") {
-          effectiveText += " 只有全部可用账号的实际余额都已验证且可比较时才执行余额策略；否则整体回退到最少使用优先，Token-only 或未知余额不会按 0 处理。";
+          effectiveText += " 只有全部路由候选的实际余额都已验证且可比较时才执行余额策略；否则整体回退到最少使用优先，Token-only 或未知余额不会按 0 处理。";
         }
         setTextIfChanged(elements.effectiveStrategyNotice, effectiveText);
 

@@ -41,6 +41,7 @@ const (
 	maxErrorBody            = 1 << 20
 	maxProxyBody            = 128 << 20
 	accountCooldown         = time.Minute
+	accountHealthTTL        = 5 * time.Minute
 	balanceTTL              = 5 * time.Minute
 	balanceAutoTTL          = time.Minute
 	balanceRefreshTime      = 20 * time.Second
@@ -55,6 +56,10 @@ const (
 	strategyRoundRobin     = "round_robin"
 	strategyLeastUsed      = "least_used"
 	strategyHighestBalance = "highest_balance"
+
+	accountHealthUnverified    = "unverified"
+	accountHealthRecentSuccess = "recent_success"
+	accountHealthRecentFailure = "recent_failure"
 )
 
 const (
@@ -303,6 +308,8 @@ type balanceRefreshCounts struct {
 type accountRuntime struct {
 	Revision         int
 	CooldownUntil    time.Time
+	HealthState      string
+	HealthCheckedAt  time.Time
 	AssignedRequests uint64
 	LastUsedAt       time.Time
 	Balance          balanceSnapshot
@@ -315,6 +322,7 @@ type accountStatus struct {
 	ID               string        `json:"id"`
 	Name             string        `json:"name"`
 	State            string        `json:"state"`
+	HealthState      string        `json:"healthState"`
 	Verified         bool          `json:"verified"`
 	BlockedReason    string        `json:"blockedReason,omitempty"`
 	CoolingDown      bool          `json:"coolingDown"`
@@ -1364,7 +1372,8 @@ func (a *application) status() routerStatus {
 			lastUsedAt = runtime.LastUsedAt.UTC().Format(time.RFC3339)
 		}
 		accounts = append(accounts, accountStatus{
-			ID: account.ID, Name: account.Name, State: state, Verified: account.Verified,
+			ID: account.ID, Name: account.Name, State: state, HealthState: accountHealthState(runtime, now),
+			Verified: account.Verified,
 			BlockedReason: account.BlockedReason, CoolingDown: cooldownUntil != "",
 			CooldownUntil: cooldownUntil, AssignedRequests: runtime.AssignedRequests,
 			LastUsedAt: lastUsedAt, Balance: publicBalanceAt(runtime.Balance, now),
@@ -1392,6 +1401,16 @@ func accountState(account accountConfig, runtime *accountRuntime, now time.Time)
 	default:
 		return "available"
 	}
+}
+
+func accountHealthState(runtime *accountRuntime, now time.Time) string {
+	if runtime.HealthCheckedAt.IsZero() || now.After(runtime.HealthCheckedAt.Add(accountHealthTTL)) {
+		return accountHealthUnverified
+	}
+	if runtime.HealthState == accountHealthRecentSuccess || runtime.HealthState == accountHealthRecentFailure {
+		return runtime.HealthState
+	}
+	return accountHealthUnverified
 }
 
 func publicBalanceAt(balance balanceSnapshot, now time.Time) publicBalance {
@@ -1751,6 +1770,9 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 	response, err := a.client.Do(upstreamRequest)
 	latency := a.now().Sub(started).Milliseconds()
 	if err != nil {
+		if matchesSaved && r.Context().Err() == nil {
+			a.markAccountHealthFailure(saved)
+		}
 		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
 			"account_ref", accountRef, "result", "upstream_error", "status", 0,
 			"error_kind", logErrorKind(err), "latency_ms", latency)
@@ -1760,10 +1782,25 @@ func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if readErr != nil {
+		if matchesSaved && r.Context().Err() == nil {
+			a.markAccountHealthFailure(saved)
+		}
+		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
+			"account_ref", accountRef, "result", "upstream_read_error", "status", response.StatusCode,
+			"error_kind", logErrorKind(readErr), "latency_ms", latency)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "statusCode": response.StatusCode, "latencyMs": latency, "message": "读取上游响应失败",
+		})
+		return
+	}
 	ok := response.StatusCode >= 200 && response.StatusCode < 300
 	message := "连接成功"
 	if !ok {
+		if matchesSaved {
+			a.markAccountHealthFailure(saved)
+		}
 		message = redactSecrets(upstreamErrorMessage(response.StatusCode, body), candidate.APIKey, candidate.NewAPISecret)
 	} else if matchesSaved {
 		a.markAccountTestSucceeded(saved)
@@ -2075,13 +2112,13 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 				defer previous.Body.Close()
 				a.logEvent(r.Context(), slog.LevelWarn, "proxy_no_candidate",
 					"request_id", requestID, "attempts", len(attempted), "last_status", previous.StatusCode)
-				a.forwardResponse(w, previous, requestID, previousAccountRef, previousAttempt, started)
+				_ = a.forwardResponse(w, previous, requestID, previousAccountRef, previousAttempt, started)
 				return
 			}
 			a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
 				"request_id", requestID, "status", http.StatusServiceUnavailable, "reason", "no_available_account",
 				"attempts", len(attempted), "duration_ms", time.Since(started).Milliseconds())
-			writeProxyError(w, http.StatusServiceUnavailable, "upstream_not_available", "没有可用账号")
+			writeProxyError(w, http.StatusServiceUnavailable, "upstream_not_available", "没有可路由账号")
 			return
 		}
 		attempt := len(attempted) + 1
@@ -2094,6 +2131,9 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 		attemptStarted := time.Now()
 		response, sendErr := a.sendUpstream(r.Context(), r, body, account)
 		if sendErr != nil {
+			if r.Context().Err() == nil {
+				a.markAccountHealthFailure(account)
+			}
 			a.logEvent(r.Context(), slog.LevelError, "proxy_upstream_failed",
 				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
 				"status", http.StatusBadGateway, "request_bytes", len(body), "error_kind", logErrorKind(sendErr),
@@ -2111,18 +2151,28 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"status", response.StatusCode, "stream", stream, "request_bytes", len(body),
 			"latency_ms", time.Since(attemptStarted).Milliseconds())
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			a.markAccountVerified(account)
 			defer response.Body.Close()
-			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
+			if forwardErr := a.forwardResponse(w, response, requestID, accountRef, attempt, started); forwardErr == nil {
+				a.markAccountVerified(account)
+			} else if r.Context().Err() == nil {
+				a.markAccountHealthFailure(account)
+			}
 			return
 		}
 		if response.StatusCode >= 500 {
+			a.markAccountHealthFailure(account)
 			defer response.Body.Close()
-			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
+			_ = a.forwardResponse(w, response, requestID, accountRef, attempt, started)
 			return
+		}
+		if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound ||
+			response.StatusCode == http.StatusMethodNotAllowed || response.StatusCode == http.StatusRequestTimeout ||
+			response.StatusCode == http.StatusGone {
+			a.markAccountHealthFailure(account)
 		}
 		retry := false
 		if response.StatusCode == http.StatusUnauthorized {
+			a.markAccountHealthFailure(account)
 			action := a.handleAccountUnauthorized(account)
 			a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
 				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
@@ -2131,18 +2181,23 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 		} else {
 			classification, inspectErr := inspectErrorResponse(response)
 			if inspectErr != nil {
+				if r.Context().Err() == nil {
+					a.markAccountHealthFailure(account)
+				}
 				a.logEvent(r.Context(), slog.LevelWarn, "proxy_response_inspection_failed",
 					"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
 					"error_kind", logErrorKind(inspectErr))
 			} else {
 				switch classification {
 				case "quota":
+					a.markAccountHealthFailure(account)
 					action := a.blockAccount(account, "quota")
 					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
 						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
 						"reason", "quota", "action", action)
 					retry = true
 				case "rate_limit":
+					a.markAccountHealthFailure(account)
 					action := a.cooldownAccount(account)
 					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
 						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
@@ -2153,7 +2208,9 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		if !retry {
 			defer response.Body.Close()
-			a.forwardResponse(w, response, requestID, accountRef, attempt, started)
+			if forwardErr := a.forwardResponse(w, response, requestID, accountRef, attempt, started); forwardErr != nil && r.Context().Err() == nil {
+				a.markAccountHealthFailure(account)
+			}
 			return
 		}
 		previous = response
@@ -2337,6 +2394,9 @@ func (a *application) setAccountVerified(expected accountConfig, clearBlocked bo
 		return
 	}
 	current := a.cfg.Accounts[index]
+	runtime := a.runtimeForLocked(current)
+	runtime.HealthState = accountHealthRecentSuccess
+	runtime.HealthCheckedAt = a.now()
 	if current.Verified && (!clearBlocked || current.BlockedReason == "") {
 		return
 	}
@@ -2351,6 +2411,18 @@ func (a *application) setAccountVerified(expected accountConfig, clearBlocked bo
 		a.logEvent(context.Background(), slog.LevelError, "account_state_persist_failed",
 			"account_ref", logReference(expected.ID), "state", "verified", "error_kind", logErrorKind(err))
 	}
+}
+
+func (a *application) markAccountHealthFailure(expected accountConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	runtime.HealthState = accountHealthRecentFailure
+	runtime.HealthCheckedAt = a.now()
 }
 
 func (a *application) handleAccountUnauthorized(expected accountConfig) string {
@@ -3721,7 +3793,7 @@ func (a *application) forwardResponse(
 	accountRef string,
 	attempt int,
 	started time.Time,
-) {
+) error {
 	copyHeaders(w.Header(), response.Header)
 	removeHopHeaders(w.Header())
 	w.WriteHeader(response.StatusCode)
@@ -3753,7 +3825,7 @@ func (a *application) forwardResponse(
 				} else {
 					errorKind = "short_write"
 				}
-				return
+				return nil
 			}
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
@@ -3763,6 +3835,7 @@ func (a *application) forwardResponse(
 			if !errors.Is(readErr, io.EOF) {
 				terminal = "upstream_read_error"
 				errorKind = logErrorKind(readErr)
+				return readErr
 			}
 			break
 		}
@@ -3773,6 +3846,7 @@ func (a *application) forwardResponse(
 			w.Header().Add(key, value)
 		}
 	}
+	return nil
 }
 
 func copyHeaders(destination, source http.Header) {
