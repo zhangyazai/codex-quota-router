@@ -30,7 +30,7 @@ import (
 
 const (
 	listenAddress           = "127.0.0.1:4000"
-	applicationVersion      = "0.2.1"
+	applicationVersion      = "0.2.5"
 	configVersion           = 3
 	configDirectory         = "codex-quota-router"
 	configFilename          = "config.dat"
@@ -40,15 +40,27 @@ const (
 	maxAdminBody            = 1 << 20
 	maxErrorBody            = 1 << 20
 	maxProxyBody            = 128 << 20
+	leastUsedBatchSize      = 30
 	accountCooldown         = time.Minute
+	upstreamFailureReset    = 5 * time.Minute
+	maxRetryAfter           = 24 * time.Hour
 	accountHealthTTL        = 5 * time.Minute
+	errorInspectionTime     = 250 * time.Millisecond
+	upstreamHeaderTime      = time.Minute
+	upstreamBodyIdleTime    = 2 * time.Minute
 	balanceTTL              = 5 * time.Minute
 	balanceAutoTTL          = time.Minute
 	balanceRefreshTime      = 20 * time.Second
 	balanceRoutingTime      = 1500 * time.Millisecond
 	balanceWorkers          = 8
 	balanceProbeParallelism = 3
+	modelsProbeTime         = 30 * time.Second
+	maxModelsBody           = 1 << 20
 	upstreamTestTime        = 30 * time.Second
+	safeUpstreamAttempts    = 5
+	safeUpstreamRetryBudget = 3 * time.Second
+	maxSoftProbeDelay       = 30 * time.Second
+	softProbeRecheck        = time.Second
 )
 
 const (
@@ -56,6 +68,7 @@ const (
 	strategyRoundRobin     = "round_robin"
 	strategyLeastUsed      = "least_used"
 	strategyHighestBalance = "highest_balance"
+	strategyLowestBalance  = "lowest_balance"
 
 	accountHealthUnverified    = "unverified"
 	accountHealthRecentSuccess = "recent_success"
@@ -107,6 +120,7 @@ const (
 var (
 	errNewAPIAuthentication = errors.New("New API authentication failed")
 	errUnsafeLogPath        = errors.New("unsafe log path")
+	errUpstreamIdleTimeout  = errors.New("upstream response idle timeout")
 )
 
 //go:embed web/index.html
@@ -131,7 +145,6 @@ type storedConfig struct {
 	Version           int             `json:"version"`
 	Accounts          []accountConfig `json:"accounts"`
 	Strategy          string          `json:"strategy"`
-	TestModel         string          `json:"testModel"`
 	AllowInsecureHTTP bool            `json:"allowInsecureHttp"`
 	GatewayToken      string          `json:"gatewayToken"`
 	LastSwitchReason  string          `json:"lastSwitchReason,omitempty"`
@@ -175,15 +188,13 @@ type accountInput struct {
 type saveRequest struct {
 	Accounts           *[]accountInput `json:"accounts"`
 	Strategy           *string         `json:"strategy"`
-	TestModel          *string         `json:"testModel"`
 	AllowInsecureHTTP  *bool           `json:"allowInsecureHttp"`
 	RotateGatewayToken bool            `json:"rotateGatewayToken"`
 }
 
-type testRequest struct {
+type accountProbeRequest struct {
 	AccountID         string        `json:"accountId"`
 	Candidate         *accountInput `json:"candidate"`
-	TestModel         string        `json:"testModel"`
 	AllowInsecureHTTP *bool         `json:"allowInsecureHttp"`
 }
 
@@ -210,7 +221,6 @@ type publicConfig struct {
 	Version                int             `json:"version"`
 	Accounts               []publicAccount `json:"accounts"`
 	Strategy               string          `json:"strategy"`
-	TestModel              string          `json:"testModel"`
 	AllowInsecureHTTP      bool            `json:"allowInsecureHttp"`
 	GatewayTokenConfigured bool            `json:"gatewayTokenConfigured"`
 	LastSwitchReason       string          `json:"lastSwitchReason,omitempty"`
@@ -306,16 +316,29 @@ type balanceRefreshCounts struct {
 }
 
 type accountRuntime struct {
-	Revision         int
-	CooldownUntil    time.Time
-	HealthState      string
-	HealthCheckedAt  time.Time
-	AssignedRequests uint64
-	LastUsedAt       time.Time
-	Balance          balanceSnapshot
-	NewAPISession    string
-	NewAPIUserID     int
-	NewAPIAuthHash   [sha256.Size]byte
+	Revision           int
+	CooldownUntil      time.Time
+	CooldownReason     string
+	UpstreamFailures   int
+	LastFailureAt      time.Time
+	LastUnauthorizedAt time.Time
+	FailureBarrierAt   time.Time
+	HealthState        string
+	HealthCheckedAt    time.Time
+	AssignedRequests   uint64
+	LastUsedAt         time.Time
+	Balance            balanceSnapshot
+	NewAPISession      string
+	NewAPIUserID       int
+	NewAPIAuthHash     [sha256.Size]byte
+	ProbeInFlight      bool
+}
+
+type accountCandidate struct {
+	account accountConfig
+	index   int
+	runtime *accountRuntime
+	probe   bool
 }
 
 type accountStatus struct {
@@ -327,6 +350,8 @@ type accountStatus struct {
 	BlockedReason    string        `json:"blockedReason,omitempty"`
 	CoolingDown      bool          `json:"coolingDown"`
 	CooldownUntil    string        `json:"cooldownUntil,omitempty"`
+	CooldownReason   string        `json:"cooldownReason,omitempty"`
+	UpstreamFailures int           `json:"upstreamFailures,omitempty"`
 	AssignedRequests uint64        `json:"assignedRequests"`
 	LastUsedAt       string        `json:"lastUsedAt,omitempty"`
 	Balance          publicBalance `json:"balance"`
@@ -358,13 +383,17 @@ type application struct {
 	balanceRoutingTimeout time.Duration
 	runtime               map[string]*accountRuntime
 	requestSequence       uint64
+	recovering            map[string]bool
+	probeChanged          chan struct{}
 	roundRobinCursor      int
+	leastUsedBatchAccount string
+	leastUsedBatchLeft    int
 	lastRoutedAccountID   string
 	lastRoutedAccountName string
 }
 
 func main() {
-	if err := run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := run(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -400,8 +429,8 @@ func run() error {
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
 	logger.Info("service_ready", "accounts", len(app.cfg.Accounts), "strategy", app.cfg.Strategy)
-	err = server.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) {
+	err = serve(server, listener)
+	if err == nil {
 		logger.Info("service_stopped", "reason", "server_closed")
 	} else {
 		logger.Error("service_stopped", "reason", "server_error", "error_kind", logErrorKind(err))
@@ -432,6 +461,7 @@ func newApplication(path string, client *http.Client, now func() time.Time) (*ap
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: time.Second,
+				ResponseHeaderTimeout: upstreamHeaderTime,
 			},
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -444,7 +474,7 @@ func newApplication(path string, client *http.Client, now func() time.Time) (*ap
 	}
 	changed := false
 	if !found {
-		cfg = storedConfig{Version: configVersion, Strategy: strategyPriority, TestModel: "gpt-5.6-sol"}
+		cfg = storedConfig{Version: configVersion, Strategy: strategyPriority}
 		changed = true
 	}
 	if cfg.Version < configVersion {
@@ -484,6 +514,8 @@ func newApplication(path string, client *http.Client, now func() time.Time) (*ap
 		balanceRoutingTimeout: balanceRoutingTime,
 		runtime:               make(map[string]*accountRuntime),
 		balanceRefreshGate:    make(chan struct{}, 1),
+		recovering:            make(map[string]bool),
+		probeChanged:          make(chan struct{}),
 	}
 	for _, account := range cfg.Accounts {
 		app.runtime[account.ID] = &accountRuntime{Revision: account.Revision}
@@ -942,7 +974,6 @@ func migrateLegacyConfig(legacy legacyStoredConfig) storedConfig {
 		Version:           configVersion,
 		Accounts:          accounts,
 		Strategy:          strategyPriority,
-		TestModel:         legacy.TestModel,
 		AllowInsecureHTTP: legacy.AllowInsecureHTTP,
 		GatewayToken:      legacy.GatewayToken,
 		LastSwitchReason:  legacy.LastSwitchReason,
@@ -1007,9 +1038,8 @@ func normalizeAndValidateConfig(cfg *storedConfig) error {
 		cfg.Strategy = strategyPriority
 	}
 	if !validStrategy(cfg.Strategy) {
-		return fmt.Errorf("策略必须是 priority、round_robin、least_used 或 highest_balance")
+		return fmt.Errorf("策略必须是 priority、round_robin、least_used、highest_balance 或 lowest_balance")
 	}
-	cfg.TestModel = strings.TrimSpace(cfg.TestModel)
 	seen := make(map[string]bool, len(cfg.Accounts))
 	for index := range cfg.Accounts {
 		account := &cfg.Accounts[index]
@@ -1043,7 +1073,8 @@ func normalizeAndValidateConfig(cfg *storedConfig) error {
 		if account.Revision < 1 {
 			account.Revision = 1
 		}
-		if account.BlockedReason != "" && account.BlockedReason != "quota" && account.BlockedReason != "unauthorized" {
+		if account.BlockedReason != "" && account.BlockedReason != "quota" && account.BlockedReason != "unauthorized" &&
+			account.BlockedReason != "restricted" {
 			return fmt.Errorf("账号 %s 的阻塞原因无效", account.Name)
 		}
 		switch account.NewAPIAuthMode {
@@ -1122,7 +1153,11 @@ func normalizedOrigin(value string) (string, bool) {
 
 func validStrategy(strategy string) bool {
 	return strategy == strategyPriority || strategy == strategyRoundRobin ||
-		strategy == strategyLeastUsed || strategy == strategyHighestBalance
+		strategy == strategyLeastUsed || isBalanceStrategy(strategy)
+}
+
+func isBalanceStrategy(strategy string) bool {
+	return strategy == strategyHighestBalance || strategy == strategyLowestBalance
 }
 
 func normalizeNewAPIAuthMode(mode string) string {
@@ -1304,14 +1339,16 @@ func (a *application) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"snippet": a.codexSnippet()})
 	case endpoint == "/codex-config" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]string{"snippet": a.codexSnippet()})
-	case endpoint == "/test" && r.Method == http.MethodPost:
-		a.handleTest(w, r)
+	case endpoint == "/models" && r.Method == http.MethodPost:
+		a.handleModels(w, r)
 	case endpoint == "/balances/refresh" && r.Method == http.MethodPost:
 		a.handleBalancesRefresh(w, r)
 	case endpoint == "/balances/test" && r.Method == http.MethodPost:
 		a.handleBalanceTest(w, r)
 	case endpoint == "/accounts/reset" && r.Method == http.MethodPost:
 		a.handleAccountReset(w, r)
+	case endpoint == "/accounts/resume" && r.Method == http.MethodPost:
+		a.handleAccountResume(w, r)
 	default:
 		writeAdminError(w, http.StatusNotFound, "管理接口不存在")
 	}
@@ -1345,7 +1382,7 @@ func (a *application) publicConfig() publicConfig {
 		})
 	}
 	return publicConfig{
-		Version: configVersion, Accounts: accounts, Strategy: a.cfg.Strategy, TestModel: a.cfg.TestModel,
+		Version: configVersion, Accounts: accounts, Strategy: a.cfg.Strategy,
 		AllowInsecureHTTP: a.cfg.AllowInsecureHTTP, GatewayTokenConfigured: a.cfg.GatewayToken != "",
 		LastSwitchReason: a.cfg.LastSwitchReason, LastSwitchAt: a.cfg.LastSwitchAt,
 	}
@@ -1372,11 +1409,19 @@ func (a *application) status() routerStatus {
 			lastUsedAt = runtime.LastUsedAt.UTC().Format(time.RFC3339)
 		}
 		accounts = append(accounts, accountStatus{
-			ID: account.ID, Name: account.Name, State: state, HealthState: accountHealthState(runtime, now),
-			Verified: account.Verified,
-			BlockedReason: account.BlockedReason, CoolingDown: cooldownUntil != "",
-			CooldownUntil: cooldownUntil, AssignedRequests: runtime.AssignedRequests,
-			LastUsedAt: lastUsedAt, Balance: publicBalanceAt(runtime.Balance, now),
+			ID:               account.ID,
+			Name:             account.Name,
+			State:            state,
+			HealthState:      accountHealthState(runtime, now),
+			Verified:         account.Verified,
+			BlockedReason:    account.BlockedReason,
+			CoolingDown:      cooldownUntil != "",
+			CooldownUntil:    cooldownUntil,
+			CooldownReason:   runtime.CooldownReason,
+			UpstreamFailures: runtime.UpstreamFailures,
+			AssignedRequests: runtime.AssignedRequests,
+			LastUsedAt:       lastUsedAt,
+			Balance:          publicBalanceAt(runtime.Balance, now),
 		})
 	}
 	effective, fallback := a.effectiveStrategyLocked(now)
@@ -1396,6 +1441,8 @@ func accountState(account accountConfig, runtime *accountRuntime, now time.Time)
 		return "incomplete"
 	case account.BlockedReason != "":
 		return "blocked"
+	case now.Before(runtime.CooldownUntil) && runtime.CooldownReason == "upstream_failures" && runtime.UpstreamFailures >= 3:
+		return "temporarily_disabled"
 	case now.Before(runtime.CooldownUntil):
 		return "cooldown"
 	default:
@@ -1477,7 +1524,7 @@ func balanceRefreshDue(balance balanceSnapshot, now time.Time, maxAge time.Durat
 }
 
 func (a *application) effectiveStrategyLocked(now time.Time) (string, string) {
-	if a.cfg.Strategy != strategyHighestBalance {
+	if !isBalanceStrategy(a.cfg.Strategy) {
 		return a.cfg.Strategy, ""
 	}
 	unit := ""
@@ -1519,7 +1566,7 @@ func (a *application) effectiveStrategyLocked(now time.Time) (string, string) {
 	if !found {
 		return strategyLeastUsed, "balance_unavailable"
 	}
-	return strategyHighestBalance, ""
+	return a.cfg.Strategy, ""
 }
 
 func (a *application) codexSnippet() string {
@@ -1545,9 +1592,6 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 	candidate := cloneConfig(a.cfg)
 	if request.Strategy != nil {
 		candidate.Strategy = *request.Strategy
-	}
-	if request.TestModel != nil {
-		candidate.TestModel = *request.TestModel
 	}
 	if request.AllowInsecureHTTP != nil {
 		candidate.AllowInsecureHTTP = *request.AllowInsecureHTTP
@@ -1724,108 +1768,148 @@ func (a *application) handleSave(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *application) handleTest(w http.ResponseWriter, r *http.Request) {
-	var request testRequest
+func (a *application) handleModels(w http.ResponseWriter, r *http.Request) {
+	var request accountProbeRequest
 	if err := decodeJSONBody(w, r, &request); err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	candidate, saved, savedFound, model, err := a.prepareTestCandidate(request, false)
+	candidate, _, _, err := a.prepareAccountCandidate(request, false)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if model == "" {
-		writeAdminError(w, http.StatusBadRequest, "请先填写测试模型")
+	ctx, cancel := context.WithTimeout(r.Context(), modelsProbeTime)
+	defer cancel()
+	models, statusCode, err := a.probeModelsAccount(ctx, candidate)
+	if err != nil {
+		if statusCode != 0 && (statusCode < 200 || statusCode >= 300) {
+			writeAdminError(w, http.StatusBadGateway, fmt.Sprintf("上游模型接口返回 HTTP %d", statusCode))
+		} else {
+			writeAdminError(w, http.StatusBadGateway, "上游模型列表响应无效")
+		}
 		return
 	}
-	accountRef := logReference(candidate.ID)
-	logStarted := time.Now()
-	matchesSaved := savedFound && sameAccountRevision(saved, candidate)
-	ctx, cancel := context.WithTimeout(r.Context(), upstreamTestTime)
-	defer cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models})
+}
+
+func (a *application) probeModelsAccount(ctx context.Context, account accountConfig) ([]string, int, error) {
+	target, err := joinUpstreamURL(account.BaseURL, "/v1/models", "")
+	if err != nil {
+		return nil, 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+account.APIKey)
+	request.Header.Set("Accept", "application/json")
+	response, err := a.client.Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, response.StatusCode, errors.New("models request rejected")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxModelsBody+1))
+	if err != nil || len(body) > maxModelsBody {
+		return nil, response.StatusCode, errors.New("invalid models response")
+	}
+	models, err := parseUpstreamModels(body, account.APIKey, account.NewAPISecret)
+	return models, response.StatusCode, err
+}
+
+func parseUpstreamModels(body []byte, secrets ...string) ([]string, error) {
+	var payload struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	data := bytes.TrimSpace(payload.Data)
+	if len(data) == 0 || data[0] != '[' {
+		return nil, errors.New("models data is not an array")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		var id string
+		if err := json.Unmarshal(entry, &id); err != nil {
+			var model struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(entry, &model); err != nil {
+				continue
+			}
+			id = model.ID
+		}
+		id = strings.TrimSpace(id)
+		sensitive := false
+		for _, secret := range secrets {
+			if secret != "" && (id == secret || len(secret) >= 8 && strings.Contains(id, secret)) {
+				sensitive = true
+				break
+			}
+		}
+		if id == "" || sensitive || seen[id] {
+			continue
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	return models, nil
+}
+
+func (a *application) probeResponsesAccount(ctx context.Context, account accountConfig, model string) (int, []byte, int64, error) {
 	payload, _ := json.Marshal(map[string]any{
 		"model": model, "input": "Reply with OK only.", "max_output_tokens": 8, "stream": false,
 	})
-	target, err := joinUpstreamURL(candidate.BaseURL, "/v1/responses", "")
+	target, err := joinUpstreamURL(account.BaseURL, "/v1/responses", "")
 	if err != nil {
-		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
-			"account_ref", accountRef, "result", "invalid_url", "error_kind", logErrorKind(err),
-			"duration_ms", time.Since(logStarted).Milliseconds())
-		writeAdminError(w, http.StatusBadRequest, "账号 URL 无效")
-		return
+		return 0, nil, 0, err
 	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+account.APIKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
 	started := a.now()
-	upstreamRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	response, err := a.client.Do(request)
 	if err != nil {
-		a.logEvent(r.Context(), slog.LevelError, "account_test_finished",
-			"account_ref", accountRef, "result", "request_creation_failed", "error_kind", logErrorKind(err),
-			"duration_ms", time.Since(logStarted).Milliseconds())
-		writeAdminError(w, http.StatusInternalServerError, "无法创建测试请求")
-		return
-	}
-	upstreamRequest.Header.Set("Authorization", "Bearer "+candidate.APIKey)
-	upstreamRequest.Header.Set("Content-Type", "application/json")
-	upstreamRequest.Header.Set("Accept", "application/json")
-	response, err := a.client.Do(upstreamRequest)
-	latency := a.now().Sub(started).Milliseconds()
-	if err != nil {
-		if matchesSaved && r.Context().Err() == nil {
-			a.markAccountHealthFailure(saved)
-		}
-		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
-			"account_ref", accountRef, "result", "upstream_error", "status", 0,
-			"error_kind", logErrorKind(err), "latency_ms", latency)
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"ok": false, "statusCode": 0, "latencyMs": latency, "message": "无法连接到上游",
-		})
-		return
+		return 0, nil, a.now().Sub(started).Milliseconds(), err
 	}
 	defer response.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-	if readErr != nil {
-		if matchesSaved && r.Context().Err() == nil {
-			a.markAccountHealthFailure(saved)
-		}
-		a.logEvent(r.Context(), slog.LevelWarn, "account_test_finished",
-			"account_ref", accountRef, "result", "upstream_read_error", "status", response.StatusCode,
-			"error_kind", logErrorKind(readErr), "latency_ms", latency)
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"ok": false, "statusCode": response.StatusCode, "latencyMs": latency, "message": "读取上游响应失败",
-		})
-		return
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = inspectErrorResponseWithTimeout(response, errorInspectionTime)
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		return response.StatusCode, body, a.now().Sub(started).Milliseconds(), nil
 	}
-	ok := response.StatusCode >= 200 && response.StatusCode < 300
-	message := "连接成功"
-	if !ok {
-		if matchesSaved {
-			a.markAccountHealthFailure(saved)
-		}
-		message = redactSecrets(upstreamErrorMessage(response.StatusCode, body), candidate.APIKey, candidate.NewAPISecret)
-	} else if matchesSaved {
-		a.markAccountTestSucceeded(saved)
+	body, err := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	if err != nil {
+		return response.StatusCode, nil, a.now().Sub(started).Milliseconds(), err
 	}
-	result := "failed"
-	level := slog.LevelWarn
-	if ok {
-		result = "ok"
-		level = slog.LevelInfo
+	if len(body) > 64<<10 {
+		return response.StatusCode, nil, a.now().Sub(started).Milliseconds(), errors.New("test response too large")
 	}
-	a.logEvent(r.Context(), level, "account_test_finished",
-		"account_ref", accountRef, "result", result, "status", response.StatusCode,
-		"latency_ms", latency, "duration_ms", time.Since(logStarted).Milliseconds())
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": ok, "statusCode": response.StatusCode, "latencyMs": latency, "message": message,
-	})
+	if !json.Valid(body) {
+		return response.StatusCode, nil, a.now().Sub(started).Milliseconds(), errors.New("test response is not valid JSON")
+	}
+	return response.StatusCode, body, a.now().Sub(started).Milliseconds(), nil
 }
 
-func (a *application) prepareTestCandidate(request testRequest, includeBalanceAuth bool) (accountConfig, accountConfig, bool, string, error) {
+func (a *application) prepareAccountCandidate(request accountProbeRequest, includeBalanceAuth bool) (accountConfig, accountConfig, bool, error) {
 	request.AccountID = strings.TrimSpace(request.AccountID)
 	if request.AccountID == "" && request.Candidate != nil {
 		request.AccountID = strings.TrimSpace(request.Candidate.ID)
 	}
 	a.mu.Lock()
-	model := a.cfg.TestModel
 	allowInsecureHTTP := a.cfg.AllowInsecureHTTP
 	var saved accountConfig
 	savedFound := false
@@ -1837,9 +1921,6 @@ func (a *application) prepareTestCandidate(request testRequest, includeBalanceAu
 		}
 	}
 	a.mu.Unlock()
-	if request.TestModel != "" {
-		model = strings.TrimSpace(request.TestModel)
-	}
 	if request.AllowInsecureHTTP != nil {
 		allowInsecureHTTP = *request.AllowInsecureHTTP
 	}
@@ -1847,15 +1928,15 @@ func (a *application) prepareTestCandidate(request testRequest, includeBalanceAu
 	if request.Candidate != nil {
 		input := *request.Candidate
 		if err := normalizeAccountInput(&input); err != nil {
-			return accountConfig{}, accountConfig{}, false, "", err
+			return accountConfig{}, accountConfig{}, false, err
 		}
 		originChanged := savedFound && baseURLMovesToDifferentOrigin(saved.BaseURL, input.BaseURL)
 		if savedFound && saved.APIKey != "" && input.APIKey == "" && !input.ClearAPIKey && originChanged {
-			return accountConfig{}, accountConfig{}, false, "", errors.New("Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
+			return accountConfig{}, accountConfig{}, false, errors.New("Base URL 更换到不同来源时，必须重新填写 API Key 或明确清除旧 Key")
 		}
 		if includeBalanceAuth && savedFound && saved.NewAPISecret != "" && input.NewAPISecret == "" && !input.ClearNewAPISecret &&
 			input.NewAPIAuthMode != newAPIAuthAPIKey && originChanged {
-			return accountConfig{}, accountConfig{}, false, "", errors.New("Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
+			return accountConfig{}, accountConfig{}, false, errors.New("Base URL 更换到不同来源时，必须重新填写 New API 余额凭据或切换为仅 API Key")
 		}
 		candidate.Name = input.Name
 		candidate.BaseURL = input.BaseURL
@@ -1866,12 +1947,12 @@ func (a *application) prepareTestCandidate(request testRequest, includeBalanceAu
 		}
 		if includeBalanceAuth {
 			if err := applyNewAPIAuthInput(&candidate, saved, input); err != nil {
-				return accountConfig{}, accountConfig{}, false, "", err
+				return accountConfig{}, accountConfig{}, false, err
 			}
 		}
 	}
 	if candidate.Name == "" {
-		candidate.Name = "待测试账号"
+		candidate.Name = "待查询账号"
 	}
 	validation := storedConfig{
 		Version: configVersion, Accounts: []accountConfig{candidate}, Strategy: strategyPriority,
@@ -1885,13 +1966,13 @@ func (a *application) prepareTestCandidate(request testRequest, includeBalanceAu
 		validation.Accounts[0].Revision = 1
 	}
 	if err := normalizeAndValidateConfig(&validation); err != nil {
-		return accountConfig{}, accountConfig{}, false, "", err
+		return accountConfig{}, accountConfig{}, false, err
 	}
 	candidate = validation.Accounts[0]
 	if !accountConfigured(candidate) {
-		return accountConfig{}, accountConfig{}, false, "", errors.New("该账号尚未完整配置")
+		return accountConfig{}, accountConfig{}, false, errors.New("该账号尚未完整配置")
 	}
-	return candidate, saved, savedFound, model, nil
+	return candidate, saved, savedFound, nil
 }
 
 func (a *application) handleBalancesRefresh(w http.ResponseWriter, r *http.Request) {
@@ -1948,12 +2029,12 @@ func countBalanceReports(reports []balanceRefreshReport) balanceRefreshCounts {
 }
 
 func (a *application) handleBalanceTest(w http.ResponseWriter, r *http.Request) {
-	var request testRequest
+	var request accountProbeRequest
 	if err := decodeJSONBody(w, r, &request); err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	candidate, saved, savedFound, _, err := a.prepareTestCandidate(request, true)
+	candidate, saved, savedFound, err := a.prepareAccountCandidate(request, true)
 	if err != nil {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2023,8 +2104,90 @@ func (a *application) handleAccountReset(w http.ResponseWriter, r *http.Request)
 		writeAdminError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
+	account := a.cfg.Accounts[index]
+	if a.recovering == nil {
+		a.recovering = make(map[string]bool)
+	}
+	if a.recovering[request.ID] {
+		a.mu.Unlock()
+		writeAdminError(w, http.StatusConflict, "该账号正在验证，请稍候")
+		return
+	}
+	a.recovering[request.ID] = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		delete(a.recovering, request.ID)
+		a.mu.Unlock()
+	}()
+	modelsContext, cancelModels := context.WithTimeout(r.Context(), modelsProbeTime)
+	models, modelsStatusCode, err := a.probeModelsAccount(modelsContext, account)
+	cancelModels()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": "无法获取账号支持模型，账号状态未改变",
+			"message": "无法获取账号支持模型，账号状态未改变", "statusCode": modelsStatusCode,
+			"status": a.status(),
+		})
+		return
+	}
+	if len(models) == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": "上游未返回可用于验证的模型，账号状态未改变",
+			"message": "上游未返回可用于验证的模型，账号状态未改变", "statusCode": modelsStatusCode,
+			"status": a.status(),
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), upstreamTestTime)
+	defer cancel()
+	statusCode, body, latency, err := a.probeResponsesAccount(ctx, account, models[0])
+	if err != nil {
+		if r.Context().Err() == nil {
+			a.markAccountHealthFailure(account)
+		}
+		a.handleAccountTestFailed(account, statusCode, body)
+		a.logEvent(r.Context(), slog.LevelWarn, "account_reset_failed",
+			"account_ref", logReference(request.ID), "result", "upstream_error",
+			"status", statusCode, "error_kind", logErrorKind(err), "latency_ms", latency)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": "真实模型请求验证未完成，账号已进入冷却或保持阻止",
+			"message":    "真实模型请求验证未完成，账号已进入冷却或保持阻止",
+			"statusCode": statusCode, "latencyMs": latency,
+			"status": a.status(),
+		})
+		return
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		if r.Context().Err() == nil {
+			a.markAccountHealthFailure(account)
+		}
+		a.handleAccountTestFailed(account, statusCode, body)
+		a.logEvent(r.Context(), slog.LevelWarn, "account_reset_failed",
+			"account_ref", logReference(request.ID), "result", "rejected",
+			"status", statusCode, "latency_ms", latency)
+		message := redactSecrets(upstreamErrorMessage(statusCode, body), account.APIKey, account.NewAPISecret)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": "验证未通过，已更新账号状态：" + message,
+			"message":    "验证未通过，已更新账号状态：" + message,
+			"statusCode": statusCode, "latencyMs": latency,
+			"status": a.status(),
+		})
+		return
+	}
+	a.mu.Lock()
+	index = a.accountIndexLocked(request.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], account) {
+		a.mu.Unlock()
+		a.logEvent(r.Context(), slog.LevelWarn, "account_reset_failed",
+			"account_ref", logReference(request.ID), "result", "stale_config",
+			"status", statusCode, "latency_ms", latency)
+		writeAdminError(w, http.StatusConflict, "账号配置已变化，请重新验证")
+		return
+	}
 	candidate := cloneConfig(a.cfg)
 	candidate.Accounts[index].BlockedReason = ""
+	candidate.Accounts[index].Verified = true
 	candidate.Accounts[index].Revision++
 	candidate.LastSwitchReason = "account_reset"
 	candidate.LastSwitchAt = a.now().UTC().Format(time.RFC3339)
@@ -2038,10 +2201,71 @@ func (a *application) handleAccountReset(w http.ResponseWriter, r *http.Request)
 	a.cfg = candidate
 	runtime := a.runtimeForLocked(candidate.Accounts[index])
 	runtime.CooldownUntil = time.Time{}
+	runtime.CooldownReason = ""
+	runtime.UpstreamFailures = 0
+	runtime.LastFailureAt = time.Time{}
+	runtime.LastUnauthorizedAt = time.Time{}
+	runtime.FailureBarrierAt = a.now()
+	runtime.HealthState = accountHealthRecentSuccess
+	runtime.HealthCheckedAt = a.now()
 	a.mu.Unlock()
-	a.logEvent(r.Context(), slog.LevelInfo, "account_reset", "account_ref", logReference(request.ID))
+	a.logEvent(r.Context(), slog.LevelInfo, "account_reset",
+		"account_ref", logReference(request.ID), "status", statusCode, "latency_ms", latency)
 	a.refreshBalances(r.Context(), map[string]bool{request.ID: true}, 0)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": a.publicConfig(), "status": a.status()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "message": "真实模型请求验证成功，已清除阻止或冷却状态",
+		"model": models[0], "statusCode": statusCode, "latencyMs": latency,
+		"config": a.publicConfig(), "status": a.status(),
+	})
+}
+
+func (a *application) handleAccountResume(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		ID string `json:"id"`
+	}
+	if err := decodeJSONBody(w, r, &request); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	request.ID = strings.TrimSpace(request.ID)
+	a.mu.Lock()
+	index := a.accountIndexLocked(request.ID)
+	if index < 0 {
+		a.mu.Unlock()
+		writeAdminError(w, http.StatusNotFound, "账号不存在")
+		return
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	if runtime.CooldownReason != "upstream_failures" || runtime.UpstreamFailures == 0 {
+		a.mu.Unlock()
+		writeAdminError(w, http.StatusConflict, "账号当前未因请求失败过多而暂时停用")
+		return
+	}
+	runtime.CooldownUntil = time.Time{}
+	runtime.CooldownReason = ""
+	runtime.UpstreamFailures = 0
+	runtime.LastFailureAt = time.Time{}
+	runtime.LastUnauthorizedAt = time.Time{}
+	runtime.FailureBarrierAt = a.now()
+	runtime.HealthState = accountHealthUnverified
+	runtime.HealthCheckedAt = time.Time{}
+	a.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "message": "账号已恢复，将从下一次请求起重新参与路由", "status": a.status(),
+	})
+}
+
+func (a *application) handleAccountTestFailed(account accountConfig, statusCode int, body []byte) {
+	switch {
+	case statusCode == http.StatusPaymentRequired || structuredQuotaError(body):
+		a.blockAccount(account, "quota")
+	case structuredAccountRestrictionError(body):
+		a.blockAccount(account, "restricted")
+	case statusCode == http.StatusUnauthorized:
+		a.blockAccount(account, "unauthorized")
+	default:
+		a.cooldownAccount(account)
+	}
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, destination any) error {
@@ -2103,16 +2327,27 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	attempted := make(map[string]bool)
 	var previous *http.Response
+	upstreamUnavailable := false
 	previousAccountRef := "none"
 	previousAttempt := 0
 	for {
-		account, ok := a.selectAccount(r.Context(), attempted)
+		account, ok, probe := a.selectProxyAccount(r.Context(), attempted)
 		if !ok {
+			if r.Context().Err() != nil {
+				if previous != nil {
+					previous.Body.Close()
+				}
+				return
+			}
 			if previous != nil {
 				defer previous.Body.Close()
 				a.logEvent(r.Context(), slog.LevelWarn, "proxy_no_candidate",
 					"request_id", requestID, "attempts", len(attempted), "last_status", previous.StatusCode)
 				_ = a.forwardResponse(w, previous, requestID, previousAccountRef, previousAttempt, started)
+				return
+			}
+			if upstreamUnavailable {
+				writeProxyError(w, http.StatusBadGateway, "upstream_unavailable", "无法连接到上游账号")
 				return
 			}
 			a.logEvent(r.Context(), slog.LevelWarn, "proxy_request_rejected",
@@ -2124,13 +2359,22 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 		attempt := len(attempted) + 1
 		accountRef := logReference(account.ID)
 		attempted[account.ID] = true
+		finishProbe := func() {
+			if probe {
+				a.finishAccountProbe(account, false)
+				probe = false
+			}
+		}
 		if previous != nil {
 			previous.Body.Close()
 			previous = nil
 		}
 		attemptStarted := time.Now()
+		failureStartedAt := a.now()
 		response, sendErr := a.sendUpstream(r.Context(), r, body, account)
 		if sendErr != nil {
+			replayable := safeToReplayUpstreamError(r.Method, sendErr)
+			upstreamUnavailable = upstreamUnavailable || replayable
 			if r.Context().Err() == nil {
 				a.markAccountHealthFailure(account)
 			}
@@ -2138,7 +2382,18 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
 				"status", http.StatusBadGateway, "request_bytes", len(body), "error_kind", logErrorKind(sendErr),
 				"latency_ms", time.Since(attemptStarted).Milliseconds(), "duration_ms", time.Since(started).Milliseconds())
-			writeProxyError(w, http.StatusBadGateway, "upstream_unavailable", "无法连接到上游账号")
+			if r.Context().Err() == nil {
+				a.cooldownAccountForFailure(account, failureStartedAt)
+				if replayable {
+					finishProbe()
+					continue
+				}
+			}
+			finishProbe()
+			if r.Context().Err() != nil {
+				return
+			}
+			writeProxyError(w, http.StatusBadGateway, "upstream_result_unknown", "请求可能已被上游处理，但结果未返回")
 			return
 		}
 		stream := strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
@@ -2151,19 +2406,39 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"status", response.StatusCode, "stream", stream, "request_bytes", len(body),
 			"latency_ms", time.Since(attemptStarted).Milliseconds())
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			if probe {
+				a.finishAccountProbe(account, true)
+				probe = false
+			}
 			defer response.Body.Close()
-			if forwardErr := a.forwardResponse(w, response, requestID, accountRef, attempt, started); forwardErr == nil {
+			forwardErr := a.forwardResponse(w, response, requestID, accountRef, attempt, started)
+			if forwardErr == nil {
 				a.markAccountVerified(account)
 			} else if r.Context().Err() == nil {
 				a.markAccountHealthFailure(account)
+				a.cooldownAccountForFailure(account, failureStartedAt)
 			}
+			finishProbe()
 			return
 		}
 		if response.StatusCode >= 500 {
 			a.markAccountHealthFailure(account)
+			a.cooldownAccountForFailure(account, failureStartedAt)
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				previous = response
+				previousAccountRef = accountRef
+				previousAttempt = attempt
+				finishProbe()
+				continue
+			}
 			defer response.Body.Close()
+			finishProbe()
 			_ = a.forwardResponse(w, response, requestID, accountRef, attempt, started)
 			return
+		}
+		a.clearUpstreamFailures(account, response.StatusCode != http.StatusUnauthorized)
+		if response.StatusCode != http.StatusUnauthorized {
+			a.clearUnauthorizedFailure(account)
 		}
 		if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound ||
 			response.StatusCode == http.StatusMethodNotAllowed || response.StatusCode == http.StatusRequestTimeout ||
@@ -2171,52 +2446,73 @@ func (a *application) handleProxy(w http.ResponseWriter, r *http.Request) {
 			a.markAccountHealthFailure(account)
 		}
 		retry := false
-		if response.StatusCode == http.StatusUnauthorized {
+		classification, inspectErr := inspectErrorResponse(response)
+		if inspectErr != nil {
+			if r.Context().Err() == nil {
+				a.markAccountHealthFailure(account)
+			}
+			a.logEvent(r.Context(), slog.LevelWarn, "proxy_response_inspection_failed",
+				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+				"error_kind", logErrorKind(inspectErr))
+		} else {
+			switch classification {
+			case "quota":
+				a.markAccountHealthFailure(account)
+				action := a.blockAccount(account, "quota")
+				a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
+					"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+					"reason", "quota", "action", action)
+				retry = true
+			case "account_restricted":
+				a.markAccountHealthFailure(account)
+				a.blockAccount(account, "restricted")
+				retry = true
+			case "rate_limit":
+				a.markAccountHealthFailure(account)
+				action := a.cooldownAccountFor(account, "rate_limit", retryAfterDuration(response.Header.Get("Retry-After"), a.now()))
+				a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
+					"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+					"reason", "rate_limit", "action", action)
+				retry = true
+			}
+		}
+		if !retry && response.StatusCode == http.StatusUnauthorized {
 			a.markAccountHealthFailure(account)
-			action := a.handleAccountUnauthorized(account)
+			action := a.handleAccountUnauthorized(account, failureStartedAt)
 			a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
 				"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
 				"reason", "unauthorized", "action", action)
 			retry = true
-		} else {
-			classification, inspectErr := inspectErrorResponse(response)
-			if inspectErr != nil {
-				if r.Context().Err() == nil {
-					a.markAccountHealthFailure(account)
-				}
-				a.logEvent(r.Context(), slog.LevelWarn, "proxy_response_inspection_failed",
-					"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
-					"error_kind", logErrorKind(inspectErr))
-			} else {
-				switch classification {
-				case "quota":
-					a.markAccountHealthFailure(account)
-					action := a.blockAccount(account, "quota")
-					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
-						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
-						"reason", "quota", "action", action)
-					retry = true
-				case "rate_limit":
-					a.markAccountHealthFailure(account)
-					action := a.cooldownAccount(account)
-					a.logEvent(r.Context(), slog.LevelWarn, "proxy_account_retry",
-						"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
-						"reason", "rate_limit", "action", action)
-					retry = true
-				}
-			}
 		}
 		if !retry {
 			defer response.Body.Close()
+			finishProbe()
 			if forwardErr := a.forwardResponse(w, response, requestID, accountRef, attempt, started); forwardErr != nil && r.Context().Err() == nil {
 				a.markAccountHealthFailure(account)
+				a.cooldownAccountForFailure(account, failureStartedAt)
 			}
 			return
 		}
 		previous = response
 		previousAccountRef = accountRef
 		previousAttempt = attempt
+		finishProbe()
 	}
+}
+
+func safeToReplayUpstreamError(method string, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		return true
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return true
+	}
+	var operationError *net.OpError
+	return errors.As(err, &operationError) && operationError.Op == "dial"
 }
 
 func requestHasGatewayToken(r *http.Request, expected string) bool {
@@ -2255,10 +2551,23 @@ func (a *application) accountIndexLocked(id string) int {
 }
 
 func (a *application) selectAccount(ctx context.Context, attempted map[string]bool) (accountConfig, bool) {
+	account, ok, _ := a.selectAccountWithMode(ctx, attempted, false)
+	return account, ok
+}
+
+func (a *application) selectProxyAccount(ctx context.Context, attempted map[string]bool) (accountConfig, bool, bool) {
+	return a.selectAccountWithMode(ctx, attempted, true)
+}
+
+func (a *application) selectAccountWithMode(
+	ctx context.Context,
+	attempted map[string]bool,
+	allowSoftProbe bool,
+) (accountConfig, bool, bool) {
 	a.mu.Lock()
 	strategy := a.cfg.Strategy
 	var stale map[string]bool
-	if strategy == strategyHighestBalance {
+	if isBalanceStrategy(strategy) {
 		now := a.now()
 		stale = make(map[string]bool)
 		for _, account := range a.cfg.Accounts {
@@ -2282,72 +2591,221 @@ func (a *application) selectAccount(ctx context.Context, attempted map[string]bo
 			a.markBalanceRouteTimeout(stale)
 		}
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := a.now()
-	type candidateAccount struct {
-		account accountConfig
-		index   int
-		runtime *accountRuntime
-	}
-	candidates := make([]candidateAccount, 0, len(a.cfg.Accounts))
-	for index, account := range a.cfg.Accounts {
-		runtime := a.runtimeForLocked(account)
-		if !attempted[account.ID] && accountState(account, runtime, now) == "available" {
-			candidates = append(candidates, candidateAccount{account: account, index: index, runtime: runtime})
+	for {
+		a.mu.Lock()
+		now := a.now()
+		regular := make([]accountCandidate, 0, len(a.cfg.Accounts))
+		probes := make([]accountCandidate, 0, len(a.cfg.Accounts))
+		emergency := make([]accountCandidate, 0, len(a.cfg.Accounts))
+		softRemaining := false
+		var wakeAt time.Time
+		for index, account := range a.cfg.Accounts {
+			if attempted[account.ID] || !account.Enabled || !accountConfigured(account) || account.BlockedReason != "" {
+				continue
+			}
+			runtime := a.runtimeForLocked(account)
+			state := accountState(account, runtime, now)
+			softFailure := runtime.CooldownReason == "upstream_failures" && runtime.UpstreamFailures > 0
+			if !allowSoftProbe || !softFailure {
+				if state == "available" {
+					regular = append(regular, accountCandidate{account: account, index: index, runtime: runtime})
+				}
+				continue
+			}
+			softRemaining = true
+			if runtime.ProbeInFlight {
+				continue
+			}
+			candidate := accountCandidate{account: account, index: index, runtime: runtime, probe: true}
+			if state == "available" {
+				probes = append(probes, candidate)
+				continue
+			}
+			probeAt := softProbeAt(runtime)
+			if !now.Before(probeAt) {
+				emergency = append(emergency, candidate)
+			} else if wakeAt.IsZero() || probeAt.Before(wakeAt) {
+				wakeAt = probeAt
+			}
 		}
-	}
-	if len(candidates) == 0 {
-		return accountConfig{}, false
-	}
-	effective, _ := a.effectiveStrategyLocked(now)
-	selected := 0
-	switch effective {
-	case strategyRoundRobin:
-		start := 0
-		if len(a.cfg.Accounts) != 0 {
-			start = a.roundRobinCursor % len(a.cfg.Accounts)
+
+		candidates := regular
+		forcedProbe := false
+		if len(regular) != 0 {
+			candidates = append(candidates, probes...)
+			sort.SliceStable(candidates, func(left, right int) bool {
+				return candidates[left].index < candidates[right].index
+			})
+		} else if len(probes) != 0 {
+			candidates = probes
+			forcedProbe = true
+		} else if len(emergency) != 0 {
+			candidates = emergency
+			forcedProbe = true
 		}
-		for offset := 0; offset < len(a.cfg.Accounts); offset++ {
-			index := (start + offset) % len(a.cfg.Accounts)
-			for candidateIndex := range candidates {
-				if candidates[candidateIndex].index == index {
-					selected = candidateIndex
-					offset = len(a.cfg.Accounts)
-					break
+		if len(candidates) == 0 {
+			a.leastUsedBatchAccount = ""
+			a.leastUsedBatchLeft = 0
+			if !allowSoftProbe || !softRemaining {
+				a.mu.Unlock()
+				return accountConfig{}, false, false
+			}
+			if a.probeChanged == nil {
+				a.probeChanged = make(chan struct{})
+			}
+			changed := a.probeChanged
+			a.mu.Unlock()
+			if wakeAt.IsZero() {
+				select {
+				case <-ctx.Done():
+					return accountConfig{}, false, false
+				case <-changed:
+				case <-time.After(softProbeRecheck):
+				}
+			} else {
+				delay := wakeAt.Sub(now)
+				if delay > softProbeRecheck {
+					delay = softProbeRecheck
+				}
+				if delay < 0 {
+					delay = 0
+				}
+				select {
+				case <-ctx.Done():
+					return accountConfig{}, false, false
+				case <-changed:
+				case <-time.After(delay):
+				}
+			}
+			continue
+		}
+
+		if forcedProbe {
+			sort.SliceStable(candidates, func(left, right int) bool {
+				if candidates[left].runtime.UpstreamFailures != candidates[right].runtime.UpstreamFailures {
+					return candidates[left].runtime.UpstreamFailures < candidates[right].runtime.UpstreamFailures
+				}
+				return candidates[left].runtime.LastFailureAt.Before(candidates[right].runtime.LastFailureAt)
+			})
+		}
+		effective, _ := a.effectiveStrategyLocked(now)
+		if forcedProbe || effective != strategyLeastUsed {
+			a.leastUsedBatchAccount = ""
+			a.leastUsedBatchLeft = 0
+		}
+		selected := 0
+		if !forcedProbe {
+			switch effective {
+			case strategyRoundRobin:
+				start := 0
+				if len(a.cfg.Accounts) != 0 {
+					start = a.roundRobinCursor % len(a.cfg.Accounts)
+				}
+				for offset := 0; offset < len(a.cfg.Accounts); offset++ {
+					index := (start + offset) % len(a.cfg.Accounts)
+					for candidateIndex := range candidates {
+						if candidates[candidateIndex].index == index {
+							selected = candidateIndex
+							offset = len(a.cfg.Accounts)
+							break
+						}
+					}
+				}
+				a.roundRobinCursor = (candidates[selected].index + 1) % len(a.cfg.Accounts)
+			case strategyLeastUsed:
+				batchFound := false
+				if a.leastUsedBatchLeft > 0 {
+					for index := range candidates {
+						if candidates[index].account.ID == a.leastUsedBatchAccount {
+							selected = index
+							batchFound = true
+							break
+						}
+					}
+				}
+				if !batchFound {
+					for index := 1; index < len(candidates); index++ {
+						if candidates[index].runtime.AssignedRequests < candidates[selected].runtime.AssignedRequests {
+							selected = index
+						}
+					}
+					a.leastUsedBatchAccount = candidates[selected].account.ID
+					a.leastUsedBatchLeft = leastUsedBatchSize
+				}
+			case strategyHighestBalance:
+				for index := 1; index < len(candidates); index++ {
+					left := candidates[index]
+					right := candidates[selected]
+					switch {
+					case left.runtime.Balance.Unlimited && !right.runtime.Balance.Unlimited:
+						selected = index
+					case left.runtime.Balance.Unlimited == right.runtime.Balance.Unlimited &&
+						left.runtime.Balance.Amount > right.runtime.Balance.Amount:
+						selected = index
+					case left.runtime.Balance.Unlimited == right.runtime.Balance.Unlimited &&
+						left.runtime.Balance.Amount == right.runtime.Balance.Amount &&
+						left.runtime.AssignedRequests < right.runtime.AssignedRequests:
+						selected = index
+					}
+				}
+			case strategyLowestBalance:
+				for index := 1; index < len(candidates); index++ {
+					left := candidates[index]
+					right := candidates[selected]
+					switch {
+					case !left.runtime.Balance.Unlimited && right.runtime.Balance.Unlimited:
+						selected = index
+					case !left.runtime.Balance.Unlimited && !right.runtime.Balance.Unlimited &&
+						left.runtime.Balance.Amount < right.runtime.Balance.Amount:
+						selected = index
+					}
 				}
 			}
 		}
-		a.roundRobinCursor = (candidates[selected].index + 1) % len(a.cfg.Accounts)
-	case strategyLeastUsed:
-		for index := 1; index < len(candidates); index++ {
-			if candidates[index].runtime.AssignedRequests < candidates[selected].runtime.AssignedRequests {
-				selected = index
-			}
+		chosen := candidates[selected]
+		if !forcedProbe && effective == strategyLeastUsed && chosen.account.ID == a.leastUsedBatchAccount && a.leastUsedBatchLeft > 0 {
+			a.leastUsedBatchLeft--
 		}
-	case strategyHighestBalance:
-		for index := 1; index < len(candidates); index++ {
-			left := candidates[index]
-			right := candidates[selected]
-			switch {
-			case left.runtime.Balance.Unlimited && !right.runtime.Balance.Unlimited:
-				selected = index
-			case left.runtime.Balance.Unlimited == right.runtime.Balance.Unlimited &&
-				left.runtime.Balance.Amount > right.runtime.Balance.Amount:
-				selected = index
-			case left.runtime.Balance.Unlimited == right.runtime.Balance.Unlimited &&
-				left.runtime.Balance.Amount == right.runtime.Balance.Amount &&
-				left.runtime.AssignedRequests < right.runtime.AssignedRequests:
-				selected = index
-			}
+		if chosen.probe {
+			chosen.runtime.ProbeInFlight = true
 		}
+		chosen.runtime.AssignedRequests++
+		chosen.runtime.LastUsedAt = now
+		a.lastRoutedAccountID = chosen.account.ID
+		a.lastRoutedAccountName = chosen.account.Name
+		a.mu.Unlock()
+		return chosen.account, true, chosen.probe
 	}
-	chosen := candidates[selected]
-	chosen.runtime.AssignedRequests++
-	chosen.runtime.LastUsedAt = now
-	a.lastRoutedAccountID = chosen.account.ID
-	a.lastRoutedAccountName = chosen.account.Name
-	return chosen.account, true
+}
+
+func softProbeAt(runtime *accountRuntime) time.Time {
+	delay := upstreamFailureCooldown(runtime.UpstreamFailures)
+	if delay > maxSoftProbeDelay {
+		delay = maxSoftProbeDelay
+	}
+	probeAt := runtime.LastFailureAt.Add(delay)
+	if !runtime.CooldownUntil.IsZero() && runtime.CooldownUntil.Before(probeAt) {
+		return runtime.CooldownUntil
+	}
+	return probeAt
+}
+
+func (a *application) finishAccountProbe(account accountConfig, accepted bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if runtime := a.runtime[account.ID]; runtime != nil && runtime.Revision == account.Revision {
+		if accepted && runtime.CooldownReason == "upstream_failures" {
+			runtime.CooldownUntil = time.Time{}
+			runtime.CooldownReason = ""
+		}
+		runtime.ProbeInFlight = false
+	}
+	if a.probeChanged == nil {
+		a.probeChanged = make(chan struct{})
+		return
+	}
+	close(a.probeChanged)
+	a.probeChanged = make(chan struct{})
 }
 
 func (a *application) markBalanceRouteTimeout(ids map[string]bool) {
@@ -2379,14 +2837,10 @@ func (a *application) markBalanceRouteTimeout(ids map[string]bool) {
 }
 
 func (a *application) markAccountVerified(expected accountConfig) {
-	a.setAccountVerified(expected, false)
+	a.setAccountVerified(expected)
 }
 
-func (a *application) markAccountTestSucceeded(expected accountConfig) {
-	a.setAccountVerified(expected, true)
-}
-
-func (a *application) setAccountVerified(expected accountConfig, clearBlocked bool) {
+func (a *application) setAccountVerified(expected accountConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
@@ -2395,16 +2849,18 @@ func (a *application) setAccountVerified(expected accountConfig, clearBlocked bo
 	}
 	current := a.cfg.Accounts[index]
 	runtime := a.runtimeForLocked(current)
+	clearUpstreamFailureState(runtime)
+	runtime.FailureBarrierAt = a.now()
+	runtime.LastUnauthorizedAt = time.Time{}
+	runtime.CooldownUntil = time.Time{}
+	runtime.CooldownReason = ""
 	runtime.HealthState = accountHealthRecentSuccess
 	runtime.HealthCheckedAt = a.now()
-	if current.Verified && (!clearBlocked || current.BlockedReason == "") {
+	if current.Verified {
 		return
 	}
 	candidate := cloneConfig(a.cfg)
 	candidate.Accounts[index].Verified = true
-	if clearBlocked {
-		candidate.Accounts[index].BlockedReason = ""
-	}
 	if err := saveConfig(a.configPath, candidate); err == nil {
 		a.cfg = candidate
 	} else {
@@ -2425,16 +2881,34 @@ func (a *application) markAccountHealthFailure(expected accountConfig) {
 	runtime.HealthCheckedAt = a.now()
 }
 
-func (a *application) handleAccountUnauthorized(expected accountConfig) string {
+func (a *application) handleAccountUnauthorized(expected accountConfig, startedAt ...time.Time) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
 	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
 		return "stale"
 	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	now := a.now()
+	if len(startedAt) != 0 && !startedAt[0].IsZero() && !runtime.FailureBarrierAt.IsZero() &&
+		!startedAt[0].After(runtime.FailureBarrierAt) {
+		return "ignored"
+	}
+	runtime.FailureBarrierAt = now
 	if !a.cfg.Accounts[index].Verified {
-		a.runtimeForLocked(a.cfg.Accounts[index]).CooldownUntil = a.now().Add(accountCooldown)
-		return "cooldown"
+		if runtime.CooldownReason == "unauthorized" && now.Before(runtime.CooldownUntil) {
+			return "cooldown"
+		}
+		if len(startedAt) != 0 && !startedAt[0].IsZero() && !runtime.LastUnauthorizedAt.IsZero() &&
+			!startedAt[0].After(runtime.LastUnauthorizedAt) {
+			return "ignored"
+		}
+		if runtime.LastUnauthorizedAt.IsZero() || now.Sub(runtime.LastUnauthorizedAt) > upstreamFailureReset {
+			runtime.LastUnauthorizedAt = now
+			runtime.CooldownUntil = now.Add(accountCooldown)
+			runtime.CooldownReason = "unauthorized"
+			return "cooldown"
+		}
 	}
 	a.blockAccountLocked(index, "unauthorized")
 	return "blocked"
@@ -2467,10 +2941,19 @@ func (a *application) blockAccountLocked(index int, reason string) {
 			"account_ref", logReference(candidate.Accounts[index].ID), "state", "blocked",
 			"reason", reason, "error_kind", logErrorKind(err))
 	}
-	a.runtimeForLocked(a.cfg.Accounts[index]).CooldownUntil = time.Time{}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	clearUpstreamFailureState(runtime)
+	runtime.FailureBarrierAt = now
+	runtime.LastUnauthorizedAt = time.Time{}
+	runtime.CooldownUntil = time.Time{}
+	runtime.CooldownReason = ""
 }
 
 func (a *application) cooldownAccount(expected accountConfig) string {
+	return a.cooldownAccountFor(expected, "temporary", accountCooldown)
+}
+
+func (a *application) cooldownAccountFor(expected accountConfig, reason string, duration time.Duration) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	index := a.accountIndexLocked(expected.ID)
@@ -2478,8 +2961,94 @@ func (a *application) cooldownAccount(expected accountConfig) string {
 		return "stale"
 	}
 	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
-	runtime.CooldownUntil = a.now().Add(accountCooldown)
+	now := a.now()
+	clearUpstreamFailureState(runtime)
+	runtime.FailureBarrierAt = now
+	runtime.CooldownUntil = now.Add(duration)
+	runtime.CooldownReason = reason
 	return "cooldown"
+}
+
+func (a *application) clearUpstreamFailures(expected accountConfig, recordBarrier bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return
+	}
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	clearUpstreamFailureState(runtime)
+	if recordBarrier {
+		runtime.FailureBarrierAt = a.now()
+	}
+}
+
+func (a *application) clearUnauthorizedFailure(expected accountConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return
+	}
+	a.runtimeForLocked(a.cfg.Accounts[index]).LastUnauthorizedAt = time.Time{}
+}
+
+func clearUpstreamFailureState(runtime *accountRuntime) {
+	runtime.UpstreamFailures = 0
+	runtime.LastFailureAt = time.Time{}
+	if runtime.CooldownReason == "upstream_failures" {
+		runtime.CooldownUntil = time.Time{}
+		runtime.CooldownReason = ""
+	}
+}
+
+func (a *application) cooldownAccountForFailure(expected accountConfig, startedAt ...time.Time) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.accountIndexLocked(expected.ID)
+	if index < 0 || !sameAccountRevision(a.cfg.Accounts[index], expected) {
+		return "stale"
+	}
+	now := a.now()
+	runtime := a.runtimeForLocked(a.cfg.Accounts[index])
+	if runtime.CooldownReason == "upstream_failures" && now.Before(runtime.CooldownUntil) && !runtime.ProbeInFlight {
+		return upstreamFailureAction(runtime.UpstreamFailures)
+	}
+	if len(startedAt) != 0 && !startedAt[0].IsZero() && !runtime.FailureBarrierAt.IsZero() &&
+		!startedAt[0].After(runtime.FailureBarrierAt) {
+		return "ignored"
+	}
+	if runtime.LastFailureAt.IsZero() || (!runtime.CooldownUntil.IsZero() && now.Sub(runtime.CooldownUntil) > upstreamFailureReset) {
+		runtime.UpstreamFailures = 0
+	}
+	runtime.UpstreamFailures++
+	runtime.LastFailureAt = now
+	runtime.FailureBarrierAt = now
+	runtime.CooldownReason = "upstream_failures"
+	runtime.CooldownUntil = now.Add(upstreamFailureCooldown(runtime.UpstreamFailures))
+	return upstreamFailureAction(runtime.UpstreamFailures)
+}
+
+func upstreamFailureAction(failures int) string {
+	if failures >= 3 {
+		return "temporarily_disabled"
+	}
+	return "cooldown"
+}
+
+func upstreamFailureCooldown(failures int) time.Duration {
+	switch failures {
+	case 1:
+		return 10 * time.Second
+	case 2:
+		return 30 * time.Second
+	case 3:
+		return 5 * time.Minute
+	case 4:
+		return 15 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }
 
 func sameAccountRevision(current, expected accountConfig) bool {
@@ -2623,6 +3192,25 @@ func (a *application) clearNewAPISession(expected accountConfig) {
 }
 
 func (a *application) sendUpstream(ctx context.Context, original *http.Request, body []byte, account accountConfig) (*http.Response, error) {
+	started := time.Now()
+	for attempt := 1; ; attempt++ {
+		response, err := a.sendUpstreamOnce(ctx, original, body, account)
+		if err == nil || attempt >= safeUpstreamAttempts || !safeToReplayUpstreamError(original.Method, err) {
+			return response, err
+		}
+		delay := safeUpstreamRetryDelay(attempt)
+		if time.Since(started)+delay >= safeUpstreamRetryBudget {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+func (a *application) sendUpstreamOnce(ctx context.Context, original *http.Request, body []byte, account accountConfig) (*http.Response, error) {
 	target, err := joinUpstreamURL(account.BaseURL, original.URL.Path, original.URL.RawQuery)
 	if err != nil {
 		return nil, err
@@ -2638,6 +3226,19 @@ func (a *application) sendUpstream(ctx context.Context, original *http.Request, 
 	request.Header.Del("Cookie")
 	request.Header.Set("Authorization", "Bearer "+account.APIKey)
 	return a.client.Do(request)
+}
+
+func safeUpstreamRetryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 1:
+		return 50 * time.Millisecond
+	case 2:
+		return 100 * time.Millisecond
+	case 3:
+		return 200 * time.Millisecond
+	default:
+		return 400 * time.Millisecond
+	}
 }
 
 func joinUpstreamURL(baseURL, requestPath, rawQuery string) (string, error) {
@@ -3664,19 +4265,69 @@ type readCloser struct {
 }
 
 func inspectErrorResponse(response *http.Response) (string, error) {
-	originalBody := response.Body
-	prefix, err := io.ReadAll(io.LimitReader(originalBody, maxErrorBody+1))
-	response.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), originalBody), Closer: originalBody}
-	if err != nil {
-		return "", err
-	}
-	if response.StatusCode == http.StatusPaymentRequired || structuredQuotaError(prefix) {
+	return inspectErrorResponseWithTimeout(response, errorInspectionTime)
+}
+
+func inspectErrorResponseWithTimeout(response *http.Response, timeout time.Duration) (string, error) {
+	if response.StatusCode == http.StatusPaymentRequired {
+		_ = response.Body.Close()
+		setBufferedResponseBody(response, nil)
 		return "quota", nil
+	}
+	originalBody := response.Body
+	timerDone := make(chan struct{})
+	timer := time.AfterFunc(timeout, func() {
+		_ = originalBody.Close()
+		close(timerDone)
+	})
+	prefix, err := io.ReadAll(io.LimitReader(originalBody, maxErrorBody+1))
+	timedOut := !timer.Stop()
+	if timedOut {
+		<-timerDone
+	}
+	if timedOut {
+		setBufferedResponseBody(response, prefix)
+	} else {
+		response.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), originalBody), Closer: originalBody}
+	}
+	if structuredQuotaError(prefix) {
+		return "quota", nil
+	}
+	if structuredAccountRestrictionError(prefix) {
+		return "account_restricted", nil
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		return "rate_limit", nil
 	}
+	if err != nil && !timedOut {
+		return "", err
+	}
 	return "", nil
+}
+
+func retryAfterDuration(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	duration := accountCooldown
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= int64(maxRetryAfter/time.Second) {
+		return maxRetryAfter
+	} else if err == nil && seconds > 0 {
+		duration = time.Duration(seconds) * time.Second
+	} else if retryAt, err := http.ParseTime(value); err == nil && retryAt.After(now) {
+		duration = retryAt.Sub(now)
+	}
+	if duration > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return duration
+}
+
+func setBufferedResponseBody(response *http.Response, body []byte) {
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	if response.Header == nil {
+		response.Header = make(http.Header)
+	}
+	response.Header.Set("Content-Length", strconv.FormatInt(response.ContentLength, 10))
 }
 
 func structuredQuotaError(body []byte) bool {
@@ -3717,6 +4368,43 @@ func structuredQuotaError(body []byte) bool {
 	for _, message := range messages {
 		message = strings.ToLower(message)
 		for _, phrase := range quotaPhrases {
+			if strings.Contains(message, phrase) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func structuredAccountRestrictionError(body []byte) bool {
+	if len(body) > maxErrorBody {
+		return false
+	}
+	var payload any
+	if json.Unmarshal(body, &payload) != nil {
+		return false
+	}
+	identifiers := make([]string, 0, 4)
+	messages := make([]string, 0, 2)
+	collectErrorFields(payload, &identifiers, &messages)
+	restrictedCodes := map[string]bool{
+		"account_deactivated": true, "account_suspended": true, "account_disabled": true,
+		"account_restricted": true, "user_deactivated": true, "user_suspended": true,
+		"organization_deactivated": true, "organization_suspended": true, "access_terminated": true,
+	}
+	for _, identifier := range identifiers {
+		normalized := strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(identifier)))
+		if restrictedCodes[normalized] {
+			return true
+		}
+	}
+	restrictedPhrases := []string{
+		"account has been deactivated", "account has been suspended", "account is disabled",
+		"账号已停用", "账号已封禁", "账号被限制", "账户已停用", "账户已封禁", "账户被限制",
+	}
+	for _, message := range messages {
+		message = strings.ToLower(message)
+		for _, phrase := range restrictedPhrases {
 			if strings.Contains(message, phrase) {
 				return true
 			}
@@ -3794,27 +4482,46 @@ func (a *application) forwardResponse(
 	attempt int,
 	started time.Time,
 ) error {
+	written, terminal, errorKind, err := forwardResponseWithIdleTimeoutResult(w, response, upstreamBodyIdleTime)
+	level := slog.LevelInfo
+	if terminal != "eof" {
+		level = slog.LevelWarn
+	}
+	a.logEvent(context.Background(), level, "proxy_response_finished",
+		"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
+		"status", response.StatusCode, "stream", strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream"),
+		"bytes", written, "terminal", terminal, "error_kind", errorKind,
+		"duration_ms", time.Since(started).Milliseconds())
+	return err
+}
+
+func forwardResponseWithIdleTimeout(w http.ResponseWriter, response *http.Response, timeout time.Duration) error {
+	_, _, _, err := forwardResponseWithIdleTimeoutResult(w, response, timeout)
+	return err
+}
+
+func forwardResponseWithIdleTimeoutResult(
+	w http.ResponseWriter,
+	response *http.Response,
+	timeout time.Duration,
+) (written int64, terminal string, errorKind string, err error) {
 	copyHeaders(w.Header(), response.Header)
 	removeHopHeaders(w.Header())
 	w.WriteHeader(response.StatusCode)
 	buffer := make([]byte, 32<<10)
-	written := int64(0)
-	terminal := "eof"
-	errorKind := "none"
-	stream := strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
-	defer func() {
-		level := slog.LevelInfo
-		if terminal != "eof" {
-			level = slog.LevelWarn
-		}
-		a.logEvent(context.Background(), level, "proxy_response_finished",
-			"request_id", requestID, "attempt", attempt, "account_ref", accountRef,
-			"status", response.StatusCode, "stream", stream, "bytes", written,
-			"terminal", terminal, "error_kind", errorKind,
-			"duration_ms", time.Since(started).Milliseconds())
-	}()
+	terminal = "eof"
+	errorKind = "none"
 	for {
+		timerDone := make(chan struct{})
+		timer := time.AfterFunc(timeout, func() {
+			_ = response.Body.Close()
+			close(timerDone)
+		})
 		count, readErr := response.Body.Read(buffer)
+		timedOut := !timer.Stop()
+		if timedOut {
+			<-timerDone
+		}
 		if count > 0 {
 			writeCount, writeErr := w.Write(buffer[:count])
 			written += int64(writeCount)
@@ -3825,17 +4532,24 @@ func (a *application) forwardResponse(
 				} else {
 					errorKind = "short_write"
 				}
-				return nil
+				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
 		}
+		if timedOut {
+			terminal = "upstream_idle_timeout"
+			errorKind = "timeout"
+			err = errUpstreamIdleTimeout
+			return
+		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
 				terminal = "upstream_read_error"
 				errorKind = logErrorKind(readErr)
-				return readErr
+				err = readErr
+				return
 			}
 			break
 		}
@@ -3846,7 +4560,7 @@ func (a *application) forwardResponse(
 			w.Header().Add(key, value)
 		}
 	}
-	return nil
+	return
 }
 
 func copyHeaders(destination, source http.Header) {

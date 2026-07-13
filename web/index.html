@@ -577,6 +577,19 @@
       overflow-wrap: anywhere;
     }
 
+    .account-models {
+      margin: 0.45rem 0 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+
+    .account-models-label {
+      color: var(--text);
+      font-weight: 700;
+    }
+
     .enabled-control {
       justify-self: end;
     }
@@ -699,6 +712,10 @@
 
     .test-result.danger {
       color: var(--danger);
+    }
+
+    [data-slot="models-result"]:empty {
+      display: none;
     }
 
     .empty-state {
@@ -938,7 +955,7 @@
   <main id="main" tabindex="-1" aria-busy="true" inert>
     <section class="intro" aria-labelledby="pageTitle">
       <h1 id="pageTitle">多账号 Key 池</h1>
-      <p>集中管理多个上游账号，按优先级、轮询、最少使用或最高余额规则自动路由 Codex 请求。</p>
+      <p>集中管理多个上游账号，按优先级、轮询、最少使用、余额最多或余额最少规则自动路由 Codex 请求。</p>
     </section>
 
     <div class="notice danger" id="globalNotice" role="alert" tabindex="-1" hidden></div>
@@ -963,6 +980,22 @@
       </div>
     </dl>
 
+    <section class="panel" aria-labelledby="codexTitle" style="margin-top: 1.5rem;">
+      <div class="panel-head">
+        <div>
+          <h2 id="codexTitle">Codex 用户级配置</h2>
+          <p>复制后写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
+        </div>
+        <div class="toolbar">
+          <button class="secondary" id="rotateGatewayTokenButton" type="button">更换 Token</button>
+          <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <p class="helper" style="margin-bottom: 0;">配置内容不会在页面显示。若文件已有其他设置，请合并内容，不要整份覆盖；更换 Token 后，旧 Token 会立即失效。</p>
+      </div>
+    </section>
+
     <section class="panel" aria-labelledby="strategyTitle">
       <div class="panel-head">
         <div>
@@ -980,13 +1013,9 @@
                 <option value="round_robin">轮询使用</option>
                 <option value="least_used">最少使用优先</option>
                 <option value="highest_balance">余额最多优先</option>
+                <option value="lowest_balance">余额最少优先</option>
               </select>
               <p class="helper" id="strategyHelp"></p>
-            </div>
-            <div class="field">
-              <label for="testModel">连通性测试模型</label>
-              <input id="testModel" type="text" autocomplete="off" spellcheck="false" placeholder="例如 gpt-5" aria-describedby="testModelHelp">
-              <p class="helper" id="testModelHelp">仅用于“测试模型连接”按钮，不影响独立余额查询，也不改变 Codex 实际请求中的模型。</p>
             </div>
           </div>
           <div>
@@ -1006,7 +1035,8 @@
           <div>
             <h2 id="accountsTitle">账号列表</h2>
             <p>列表顺序就是优先级顺序；最上方账号优先级最高。</p>
-            <p id="balanceRefreshResult">余额每 60 秒自动刷新（仅页面可见时）；未保存的编辑内容不会参与全局刷新。</p>
+            <p class="helper">账面余额来自上游账单或额度接口，不代表模型请求当前可用。</p>
+            <p id="balanceRefreshResult">账面余额每 60 秒自动刷新（仅页面可见时）；未保存的编辑内容不会参与全局刷新。</p>
           </div>
           <div class="toolbar">
             <button class="secondary" id="refreshBalancesButton" type="button">刷新已保存配置余额</button>
@@ -1034,21 +1064,6 @@
       </div>
     </div>
 
-    <section class="panel" aria-labelledby="codexTitle" style="margin-top: 1.5rem;">
-      <div class="panel-head">
-        <div>
-          <h2 id="codexTitle">Codex 用户级配置</h2>
-          <p>复制后写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
-        </div>
-        <div class="toolbar">
-          <button class="secondary" id="rotateGatewayTokenButton" type="button">更换 Token</button>
-          <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <p class="helper" style="margin-bottom: 0;">配置内容不会在页面显示。若文件已有其他设置，请合并内容，不要整份覆盖；更换 Token 后，旧 Token 会立即失效。</p>
-      </div>
-    </section>
   </main>
 
   <footer>管理页面仅监听本机地址；账号 Key 与余额认证秘密不会在页面中回显。</footer>
@@ -1079,6 +1094,9 @@
             <span class="tag" data-slot="state">状态未知</span>
             <span class="account-url" data-slot="url"></span>
           </div>
+          <p class="account-models">
+            <span class="account-models-label">支持模型：</span><span data-slot="models">尚未获取</span>
+          </p>
         </div>
         <label class="check-row enabled-control">
           <input type="checkbox" data-field="enabled">
@@ -1088,7 +1106,7 @@
 
       <dl class="account-summary">
         <div>
-          <dt>余额</dt>
+          <dt>账面余额</dt>
           <dd data-slot="balance">未知（尚未刷新）</dd>
         </div>
         <div>
@@ -1196,10 +1214,12 @@
 
           <div class="card-actions" style="margin-top: 1rem;">
             <button class="primary" type="button" data-action="test-balance">查询当前填写余额</button>
-            <button class="secondary" type="button" data-action="test">测试模型连接</button>
-            <button class="secondary" type="button" data-action="reset">恢复账号状态</button>
+            <button class="secondary" type="button" data-action="models">刷新支持模型</button>
+            <button class="secondary" type="button" data-action="resume" hidden>立即恢复账号</button>
+            <button class="secondary" type="button" data-action="reset">验证并恢复账号</button>
             <button class="danger-button" type="button" data-action="delete">删除账号</button>
           </div>
+          <p class="test-result" data-slot="models-result" role="status"></p>
           <p class="test-result" data-slot="test-result" role="status"></p>
         </div>
         <div class="dialog-actions">
@@ -1217,14 +1237,16 @@
         priority: "按优先级顺序",
         round_robin: "轮询使用",
         least_used: "最少使用优先",
-        highest_balance: "余额最多优先"
+        highest_balance: "余额最多优先",
+        lowest_balance: "余额最少优先"
       };
 
       var strategyDescriptions = {
-        priority: "从列表顶部开始选择第一个可参与路由的账号；失败或冷却时继续向后尝试。",
+        priority: "从列表顶部开始选择第一个可参与路由的账号；请求明确失败或进入冷却后继续向后尝试。",
         round_robin: "在可参与路由的账号之间依次轮换，让请求数量更均匀。",
-        least_used: "优先选择本次服务启动以来已分配请求数最少的路由候选；服务重启后计数重新开始。",
-        highest_balance: "只有全部路由候选的实际余额都已验证、新鲜且单位可比较时才按余额选择；瞬时网络或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
+        least_used: "从当前可参与路由的账号中选择本次服务启动以来已分配请求数最少的账号，连续分配 30 次后重新比较；批次内账号一旦不可用会立即切换。服务重启后计数重新开始。",
+        highest_balance: "只有全部路由候选的实际余额都已验证、新鲜、可读取且单位可比较时才按余额选择；瞬时网络、限流或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。",
+        lowest_balance: "只有全部路由候选的实际余额都已验证、新鲜、可读取且单位可比较时，才优先选择有限余额最低的账号；无限额度排在有限额度之后，余额相同按列表顺序。瞬时网络、限流或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告；认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
       };
 
       var stateLabels = {
@@ -1235,6 +1257,7 @@
         active: "正在使用",
         cooldown: "冷却中",
         cooling_down: "冷却中",
+        temporarily_disabled: "暂时停用",
         incomplete: "配置不完整",
         blocked: "已阻止",
         pending_changes: "待保存",
@@ -1340,7 +1363,6 @@
         savedState: document.getElementById("savedState"),
         strategy: document.getElementById("strategy"),
         strategyHelp: document.getElementById("strategyHelp"),
-        testModel: document.getElementById("testModel"),
         effectiveStrategyNotice: document.getElementById("effectiveStrategyNotice"),
         fallbackWarning: document.getElementById("fallbackWarning"),
         strategyContinuityWarning: document.getElementById("strategyContinuityWarning"),
@@ -1362,7 +1384,6 @@
       function createEmptyConfig() {
         return {
           strategy: "priority",
-          testModel: "",
           allowInsecureHttp: false,
           accounts: []
         };
@@ -1386,7 +1407,6 @@
         var accounts = Array.isArray(source.accounts) ? source.accounts : [];
         return {
           strategy: strategyLabels[source.strategy] ? source.strategy : "priority",
-          testModel: typeof source.testModel === "string" ? source.testModel : "",
           allowInsecureHttp: source.allowInsecureHttp === true,
           accounts: accounts.map(function (account) {
             var id = account.id == null ? "" : String(account.id);
@@ -1394,7 +1414,7 @@
             var newApiUserId = typeof account.newApiUserId === "number" && Number.isSafeInteger(account.newApiUserId)
               ? account.newApiUserId
               : 0;
-            return {
+            var normalizedAccount = {
               id: id,
               _uiId: id || newAccountId(),
               name: typeof account.name === "string" ? account.name : "",
@@ -1413,8 +1433,14 @@
               _savedNewApiUserId: newApiUserId,
               newApiSecretConfigured: account.newApiSecretConfigured === true,
               newApiSecret: "",
-              clearNewApiSecret: false
+              clearNewApiSecret: false,
+              _models: [],
+              _modelsState: "idle",
+              _modelsError: "",
+              _modelsRequestId: 0
             };
+            normalizedAccount._modelsState = savedAccountModelsReady(normalizedAccount) ? "idle" : "incomplete";
+            return normalizedAccount;
           })
         };
       }
@@ -1634,8 +1660,9 @@
           "move-up": "上移账号 " + name + "，当前第 " + (index + 1) + " 位",
           "move-down": "下移账号 " + name + "，当前第 " + (index + 1) + " 位",
           "test-balance": "查询账号 " + name + " 当前填写内容的余额",
-          test: "测试账号 " + name + " 的模型连接",
-          reset: "恢复账号 " + name + " 的运行状态",
+          models: "刷新账号 " + name + " 当前填写内容支持的模型",
+          resume: "立即恢复账号 " + name + " 的路由资格",
+          reset: "验证账号 " + name + "，成功后清除阻止或冷却状态",
           delete: "删除账号 " + name,
           "close-editor": (account.id ? "完成编辑账号 " : "完成添加账号 ") + name
         };
@@ -1703,6 +1730,47 @@
           ? "安全风险：" + (account.name.trim() || "此账号") + " 使用明文 HTTP。路由请求时，API Key、余额认证凭据、提示词、代码和响应可能被窃听；建议尽快改用 HTTPS。"
           : "");
         setHiddenIfChanged(warning, !insecure);
+      }
+
+      function accountHasUsableModelConfig(account) {
+        return !validateURL(account.baseUrl.trim()) &&
+          (account.apiKey.trim() !== "" || (account.keyConfigured && !account.clearApiKey));
+      }
+
+      function savedAccountModelsReady(account) {
+        return !!account.id && accountHasUsableModelConfig(account) &&
+          account.baseUrl.trim() === account._savedBaseUrl &&
+          account.apiKey.trim() === "" && !account.clearApiKey;
+      }
+
+      function accountModelsText(account) {
+        if (account._modelsState === "loading") return "正在获取…";
+        if (account._modelsState === "ready") return account._models.join("、");
+        if (account._modelsState === "empty") return "上游未返回模型";
+        if (account._modelsState === "error") return "获取失败" + (account._modelsError ? "：" + account._modelsError : "");
+        if (account._modelsState === "stale") return "配置已修改，需刷新";
+        if (account._modelsState === "incomplete") return account.id ? "配置未完整，无法获取" : "配置未完整，保存后自动获取";
+        return "尚未获取";
+      }
+
+      function updateAccountModels(card, account) {
+        var modelElement = card && card.querySelector('[data-slot="models"]');
+        if (modelElement) {
+          setTextIfChanged(modelElement, accountModelsText(account));
+        }
+      }
+
+      function invalidateAccountModels(account) {
+        account._models = [];
+        account._modelsError = "";
+        account._modelsRequestId = (account._modelsRequestId || 0) + 1;
+        account._modelsState = accountHasUsableModelConfig(account) ? "stale" : "incomplete";
+        var card = findCard(accountUIID(account));
+        var resultElement = card && card.querySelector('[data-slot="models-result"]');
+        if (resultElement) {
+          resultElement.className = "test-result";
+          resultElement.textContent = "";
+        }
       }
 
       function renderAccounts() {
@@ -1798,11 +1866,13 @@
           card.querySelector('[data-action="move-up"]').disabled = index === 0;
           card.querySelector('[data-action="move-down"]').disabled = index === config.accounts.length - 1;
           card.querySelector('[data-action="reset"]').disabled = getStatusAccount(account.id) === null;
+          card.querySelector('[data-action="resume"]').disabled = getStatusAccount(account.id) === null;
           updateAccountControlLabels(card, account, index);
           updateAccountHTTPWarning(card, account);
 
           elements.accountList.appendChild(card);
           updateAccountStatus(card, account);
+          updateAccountModels(card, account);
         });
         updatePageInteractivity();
       }
@@ -1848,6 +1918,11 @@
             pendingResetButton.disabled = true;
             pendingResetButton.title = "请先保存当前账号配置";
           }
+          var pendingResumeButton = card.querySelector('[data-action="resume"]');
+          if (pendingResumeButton) {
+            pendingResumeButton.hidden = true;
+            pendingResumeButton.disabled = true;
+          }
           return;
         }
 
@@ -1864,12 +1939,13 @@
           stateElement.classList.add("success");
         } else if (state === "cooldown" || state === "cooling_down" || state === "unverified" || state === "unknown" || state === "incomplete") {
           stateElement.classList.add("warning");
-        } else if (state === "recent_failure" || state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
+        } else if (state === "recent_failure" || state === "temporarily_disabled" || state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
           stateElement.classList.add("danger");
         }
         stateElement.title = accountStatus
           ? "路由状态：" + (stateLabels[accountStatus.state] || accountStatus.state || "状态未知") +
-            "；近期连通性：" + (stateLabels[accountStatus.healthState] || accountStatus.healthState || "待验证")
+            "；近期连通性：" + (stateLabels[accountStatus.healthState] || accountStatus.healthState || "待验证") +
+            (accountStatus.state === "available" ? "；可参与路由不代表模型请求当前可用" : "")
           : "服务端状态：" + (state || "unknown");
 
         card.querySelector('[data-slot="balance"]').textContent = formatBalance(accountStatus && accountStatus.balance);
@@ -1880,7 +1956,15 @@
         var resetButton = card.querySelector('[data-action="reset"]');
         if (resetButton) {
           resetButton.disabled = !accountStatus;
-          resetButton.title = accountStatus ? "清除该账号的阻止、冷却或近期连通性状态" : "此账号尚未保存";
+          resetButton.title = accountStatus ? "发送真实模型请求；仅验证成功后清除阻止或冷却状态" : "此账号尚未保存";
+        }
+        var resumeButton = card.querySelector('[data-action="resume"]');
+        if (resumeButton) {
+          var canResume = Boolean(accountStatus && accountStatus.cooldownUntil &&
+            accountStatus.cooldownReason === "upstream_failures" && accountStatus.upstreamFailures > 0);
+          resumeButton.hidden = !canResume;
+          resumeButton.disabled = !canResume;
+          resumeButton.title = canResume ? "清除临时停用和连续失败计数；不发送测试请求" : "账号当前未因请求失败过多而暂时停用";
         }
       }
 
@@ -1976,7 +2060,7 @@
         }
         var remaining = amount;
         if (typeof remaining === "number" && Number.isFinite(remaining)) {
-          remaining = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 }).format(remaining);
+          remaining = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(remaining);
         } else {
           remaining = String(remaining);
         }
@@ -2025,12 +2109,16 @@
           return "尚未保存";
         }
         if (accountStatus.cooldownUntil) {
+          if (accountStatus.cooldownReason === "upstream_failures" && accountStatus.upstreamFailures >= 3) {
+            return "账号请求失败过多，暂时停用至 " + formatDateTime(accountStatus.cooldownUntil, String(accountStatus.cooldownUntil));
+          }
           return "冷却至 " + formatDateTime(accountStatus.cooldownUntil, String(accountStatus.cooldownUntil));
         }
         if (accountStatus.blockedReason) {
           var blockedLabels = {
             quota: "额度耗尽",
-            unauthorized: "Key 无效"
+            unauthorized: "Key 无效",
+            restricted: "账号受限或停用"
           };
           return "已阻止：" + (blockedLabels[accountStatus.blockedReason] || String(accountStatus.blockedReason));
         }
@@ -2056,21 +2144,23 @@
 
         var selected = config.strategy;
         var savedStrategyDiffers = selected !== configured;
+        var configuredUsesBalance = configured === "highest_balance" || configured === "lowest_balance";
+        var selectedUsesBalance = selected === "highest_balance" || selected === "lowest_balance";
         var effectiveText = "服务当前实际执行：" + (strategyLabels[effective] || effective) + "。";
         if (savedStrategyDiffers) {
           effectiveText += " 页面中选择的“" + (strategyLabels[selected] || selected) + "”尚未保存。";
         }
-        if (configured === "highest_balance" || selected === "highest_balance") {
-          effectiveText += " 只有全部路由候选的实际余额都已验证且可比较时才执行余额策略；否则整体回退到最少使用优先，Token-only 或未知余额不会按 0 处理。";
+        if (configuredUsesBalance || selectedUsesBalance) {
+          effectiveText += " 只有全部路由候选的实际余额都已验证且可比较时才执行余额策略；否则整体回退到最少使用优先，Token-only 或未知余额不会按 0 处理。账面余额仅用于排序，不代表模型请求当前可用。";
         }
         setTextIfChanged(elements.effectiveStrategyNotice, effectiveText);
 
-        var hasFallback = configured === "highest_balance" && (effective !== "highest_balance" || status.fallbackReason);
+        var hasFallback = configuredUsesBalance && (effective !== configured || status.fallbackReason);
         setHiddenIfChanged(elements.fallbackWarning, !hasFallback);
         if (hasFallback) {
           var reasonCode = status.fallbackReason || "";
           var reason = fallbackReasonLabels[reasonCode] || reasonCode || "当前没有足够的已知余额数据";
-          setTextIfChanged(elements.fallbackWarning, "最高余额策略当前无法直接决策，已实际回退为“" +
+          setTextIfChanged(elements.fallbackWarning, "“" + (strategyLabels[configured] || configured) + "”当前无法直接决策，已实际回退为“" +
             (strategyLabels[effective] || effective) + "”。原因：" + reason + "。未知余额没有被当作 0。");
         }
 
@@ -2349,11 +2439,11 @@
             ? data.codexSnippet
             : (data.codexSnippet && data.codexSnippet.snippet) || "";
           elements.strategy.value = config.strategy;
-          elements.testModel.value = config.testModel;
           renderAccounts();
           updateStrategyDescription();
           markClean();
           setServiceState("online", "服务在线");
+          refreshSavedAccountModels();
         } catch (error) {
           pageReady = wasReady;
           setServiceState("offline", "连接失败");
@@ -2413,7 +2503,6 @@
             method: "PUT",
             body: JSON.stringify({
               strategy: config.strategy,
-              testModel: config.testModel.trim(),
               allowInsecureHttp: insecureURLs.length > 0,
               accounts: accounts.map(saveAccountPayload)
             })
@@ -2425,11 +2514,11 @@
             codexSnippet = data.codexSnippet;
           }
           elements.strategy.value = config.strategy;
-          elements.testModel.value = config.testModel;
           renderAccounts();
           updateStrategyDescription();
           markClean();
           setServiceState("online", "服务在线");
+          refreshSavedAccountModels();
           outcome = data.message || "全部配置已保存";
         } catch (error) {
           failure = "保存失败：" + error.message;
@@ -2519,70 +2608,155 @@
         }
       }
 
-      async function testAccount(account, button) {
-        clearGlobalError();
-        elements.testModel.removeAttribute("aria-invalid");
-        if (!config.testModel.trim()) {
-          closeAccountEditor(account);
-          elements.testModel.setAttribute("aria-invalid", "true");
-          showGlobalError("测试前请填写连通性测试模型。");
-          elements.testModel.focus();
-          announce("请先填写连通性测试模型");
-          return;
+      async function refreshAccountModels(account, button, options) {
+        var savedConfig = options && options.savedConfig === true;
+        if (!savedConfig) {
+          clearGlobalError();
         }
-        var firstInvalid = validateAccount(account, { requireKey: true, skipNewAPIAuth: true });
-        if (firstInvalid) {
-          firstInvalid.focus();
-          announce("请先修正 " + (account.name || "该账号") + " 的配置");
-          return;
-        }
-
-        var urls = httpURLs([account]);
-        var confirmed = await confirmHTTPRisk(urls);
-        if (!confirmed) {
-          announce("已取消测试");
-          return;
+        var urls = [];
+        if (savedConfig) {
+          if (getAccount(accountUIID(account)) !== account || account._modelsState !== "idle" || !savedAccountModelsReady(account)) {
+            return;
+          }
+        } else {
+          var firstInvalid = validateAccount(account, { requireKey: true, skipNewAPIAuth: true });
+          if (firstInvalid) {
+            firstInvalid.focus();
+            announce("请先修正 " + (account.name || "该账号") + " 的配置");
+            return;
+          }
+          urls = httpURLs([account]);
+          var confirmed = await confirmHTTPRisk(urls);
+          if (!confirmed) {
+            announce("已取消支持模型获取");
+            return;
+          }
         }
 
         var card = findCard(accountUIID(account));
-        var resultElement = card && card.querySelector('[data-slot="test-result"]');
-        var restoreButton = setButtonBusy(button, "正在测试…");
+        var resultElement = !savedConfig && card && card.querySelector('[data-slot="models-result"]');
+        var restoreButton = button ? setButtonBusy(button, "正在获取…") : function () {};
+        var requestId = (account._modelsRequestId || 0) + 1;
+        account._modelsRequestId = requestId;
+        account._models = [];
+        account._modelsError = "";
+        account._modelsState = "loading";
+        updateAccountModels(card, account);
         if (resultElement) {
           resultElement.className = "test-result";
-          resultElement.textContent = "正在使用当前未保存的填写内容测试…";
+          resultElement.textContent = "正在获取当前填写内容支持的模型…";
         }
 
         try {
-          var data = await api("/admin/test", {
+          var payload = { accountId: account.id };
+          if (!savedConfig) {
+            payload.candidate = {
+              id: account.id,
+              name: account.name.trim(),
+              baseUrl: account.baseUrl.trim(),
+              apiKey: account.apiKey.trim(),
+              clearApiKey: account.clearApiKey
+            };
+            payload.allowInsecureHttp = urls.length > 0;
+          }
+          var data = await api("/admin/models", {
             method: "POST",
-            body: JSON.stringify({
-              accountId: account.id,
-              candidate: candidatePayload(account),
-              testModel: config.testModel.trim(),
-              allowInsecureHttp: urls.length > 0
-            })
+            body: JSON.stringify(payload)
           });
-          var pieces = [];
-          pieces.push(data.ok === false ? "测试未通过" : "测试成功");
-          if (typeof data.statusCode === "number") {
-            pieces.push("HTTP " + data.statusCode);
+          if (getAccount(accountUIID(account)) !== account || account._modelsRequestId !== requestId) {
+            return;
           }
-          if (typeof data.latencyMs === "number") {
-            pieces.push(data.latencyMs + " ms");
-          }
-          if (data.message) {
-            pieces.push(String(data.message));
-          }
-          var message = pieces.join(" · ");
+          account._models = Array.isArray(data.models) ? data.models.filter(function (model) {
+            return typeof model === "string" && model.trim();
+          }).map(function (model) {
+            return model.trim();
+          }) : [];
+          account._modelsState = account._models.length ? "ready" : "empty";
+          updateAccountModels(findCard(accountUIID(account)), account);
+          var message = account._models.length ? "支持模型已刷新，共 " + account._models.length + " 个。" : "上游未返回模型。";
           if (resultElement) {
-            resultElement.className = data.ok === false ? "test-result danger" : "test-result success";
+            resultElement.className = "test-result success";
             resultElement.textContent = message;
           }
-          announce((account.name || "该账号") + "：" + message);
-          await refreshStatus(true);
+          if (!savedConfig) {
+            announce((account.name || "该账号") + "：" + message);
+          }
+        } catch (error) {
+          if (getAccount(accountUIID(account)) !== account || account._modelsRequestId !== requestId) {
+            return;
+          }
+          account._models = [];
+          account._modelsState = "error";
+          account._modelsError = error.message;
+          updateAccountModels(findCard(accountUIID(account)), account);
+          var failure = "支持模型获取失败：" + error.message;
+          if (resultElement) {
+            resultElement.className = "test-result danger";
+            resultElement.textContent = failure;
+          }
+          if (!savedConfig) {
+            announce((account.name || "该账号") + " " + failure);
+          }
+        } finally {
+          restoreButton();
+        }
+      }
+
+      function refreshSavedAccountModels() {
+        var queue = config.accounts.slice();
+        var workers = [];
+        for (var index = 0; index < Math.min(3, queue.length); index += 1) {
+          workers.push((async function () {
+            while (queue.length) {
+              await refreshAccountModels(queue.shift(), null, { savedConfig: true });
+            }
+          }()));
+        }
+        return Promise.all(workers);
+      }
+
+      async function resetAccount(account, button) {
+        clearGlobalError();
+        var card = findCard(accountUIID(account));
+        var resultElement = card && card.querySelector('[data-slot="test-result"]');
+        var restoreButton = setButtonBusy(button, "正在验证…");
+        if (resultElement) {
+          resultElement.className = "test-result";
+          resultElement.textContent = "正在发送真实模型请求验证账号…";
+        }
+        try {
+          var data = await api("/admin/accounts/reset", {
+            method: "POST",
+            body: JSON.stringify({ id: account.id })
+          });
+          if (!data.status) {
+            throw new Error("服务未返回账号状态");
+          }
+          status = normalizeStatus(data.status);
+          updateStatusUI();
+          var successParts = [data.message || (account.name || "账号") + " 已验证并清除阻止或冷却状态"];
+          if (typeof data.model === "string" && data.model.trim()) {
+            successParts.push("模型 " + data.model.trim());
+          }
+          if (typeof data.statusCode === "number") {
+            successParts.push("HTTP " + data.statusCode);
+          }
+          if (typeof data.latencyMs === "number") {
+            successParts.push(data.latencyMs + " ms");
+          }
+          var message = successParts.join(" · ");
+          if (resultElement) {
+            resultElement.className = "test-result success";
+            resultElement.textContent = message;
+          }
+          announce(message);
         } catch (error) {
           var errorData = error.data && typeof error.data === "object" ? error.data : {};
-          var failureParts = ["测试失败"];
+          if (errorData.status) {
+            status = normalizeStatus(errorData.status);
+            updateStatusUI();
+          }
+          var failureParts = ["验证失败"];
           if (typeof errorData.statusCode === "number" && errorData.statusCode > 0) {
             failureParts.push("HTTP " + errorData.statusCode);
           }
@@ -2595,39 +2769,35 @@
             resultElement.className = "test-result danger";
             resultElement.textContent = failure;
           }
-          announce((account.name || "该账号") + " " + failure);
+          announce(failure);
         } finally {
           restoreButton();
         }
       }
 
-      async function resetAccount(account, button) {
+      async function resumeAccount(account, button) {
         clearGlobalError();
         var card = findCard(accountUIID(account));
         var resultElement = card && card.querySelector('[data-slot="test-result"]');
         var restoreButton = setButtonBusy(button, "正在恢复…");
-        if (resultElement) {
-          resultElement.className = "test-result";
-          resultElement.textContent = "正在恢复账号状态…";
-        }
         try {
-          var data = await api("/admin/accounts/reset", {
+          var data = await api("/admin/accounts/resume", {
             method: "POST",
             body: JSON.stringify({ id: account.id })
           });
           if (!data.status) {
-            throw new Error("服务未返回余额状态");
+            throw new Error("服务未返回账号状态");
           }
           status = normalizeStatus(data.status);
           updateStatusUI();
-          var message = data.message || (account.name || "账号") + " 的运行状态已恢复";
+          var message = data.message || (account.name || "账号") + " 已恢复，将从下一次请求起重新参与路由";
           if (resultElement) {
             resultElement.className = "test-result success";
             resultElement.textContent = message;
           }
           announce(message);
         } catch (error) {
-          var failure = "恢复账号状态失败：" + error.message;
+          var failure = "恢复失败：" + error.message;
           if (resultElement) {
             resultElement.className = "test-result danger";
             resultElement.textContent = failure;
@@ -2961,7 +3131,11 @@
           _savedNewApiUserId: 0,
           newApiSecretConfigured: false,
           newApiSecret: "",
-          clearNewApiSecret: false
+          clearNewApiSecret: false,
+          _models: [],
+          _modelsState: "incomplete",
+          _modelsError: "",
+          _modelsRequestId: 0
         };
         config.accounts.push(account);
         markDirty();
@@ -3121,6 +3295,10 @@
         if (field === "baseUrl") {
           card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
         }
+        if (field === "baseUrl" || field === "apiKey" || field === "clearApiKey") {
+          invalidateAccountModels(account);
+          updateAccountModels(card, account);
+        }
         if (field === "newApiAuthMode" || field === "newApiUsername" || field === "newApiUserId" ||
             field === "clearNewApiSecret" || field === "newApiSecret") {
           updateNewAPIAuthFields(card, account);
@@ -3152,8 +3330,10 @@
           deleteAccount(account);
         } else if (action === "test-balance") {
           testAccountBalance(account, button);
-        } else if (action === "test") {
-          testAccount(account, button);
+        } else if (action === "models") {
+          refreshAccountModels(account, button);
+        } else if (action === "resume") {
+          resumeAccount(account, button);
         } else if (action === "reset") {
           resetAccount(account, button);
         }
@@ -3236,12 +3416,6 @@
         config.strategy = elements.strategy.value;
         markDirty();
         updateStrategyDescription();
-      });
-
-      elements.testModel.addEventListener("input", function () {
-        config.testModel = elements.testModel.value;
-        elements.testModel.removeAttribute("aria-invalid");
-        markDirty();
       });
 
       elements.accountList.addEventListener("input", handleAccountInput);

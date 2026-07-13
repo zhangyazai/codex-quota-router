@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +27,7 @@ func TestHealthAndEmbeddedPageExposeAutoRefreshRelease(t *testing.T) {
 	healthRequest.Host = listenAddress
 	healthResponse := httptest.NewRecorder()
 	app.routes().ServeHTTP(healthResponse, healthRequest)
-	if healthResponse.Code != http.StatusOK || !strings.Contains(healthResponse.Body.String(), `"version":"0.2.1"`) {
+	if healthResponse.Code != http.StatusOK || !strings.Contains(healthResponse.Body.String(), `"version":"0.2.5"`) {
 		t.Fatalf("health status=%d body=%s", healthResponse.Code, healthResponse.Body.String())
 	}
 
@@ -39,7 +40,12 @@ func TestHealthAndEmbeddedPageExposeAutoRefreshRelease(t *testing.T) {
 		!strings.Contains(body, "?automatic=1") || !strings.Contains(body, "<dt>可参与路由账号</dt>") ||
 		!strings.Contains(body, `available: "可参与路由"`) || !strings.Contains(body, `recent_success: "近期成功"`) ||
 		!strings.Contains(body, `recent_failure: "最近失败"`) ||
-		!strings.Contains(body, "曾成功响应（历史记录），当前状态待验证") {
+		!strings.Contains(body, "曾成功响应（历史记录），当前状态待验证") ||
+		!strings.Contains(body, "账号请求失败过多，暂时停用至") || !strings.Contains(body, "账号受限或停用") ||
+		!strings.Contains(body, "立即恢复账号") ||
+		!strings.Contains(body, `value="lowest_balance"`) || !strings.Contains(body, "验证并恢复账号") ||
+		!strings.Contains(body, "账面余额") || !strings.Contains(body, `data-slot="models"`) ||
+		!strings.Contains(body, `api("/admin/models"`) || strings.Contains(body, "testModel") {
 		t.Fatalf("embedded auto-refresh page missing: status=%d", indexResponse.Code)
 	}
 }
@@ -131,7 +137,7 @@ func TestStrategies(t *testing.T) {
 	}{
 		{name: "priority", strategy: strategyPriority, want: []string{"a", "a"}},
 		{name: "round robin", strategy: strategyRoundRobin, want: []string{"a", "b", "a"}},
-		{name: "least used", strategy: strategyLeastUsed, want: []string{"a", "b", "a"}},
+		{name: "least used", strategy: strategyLeastUsed, want: []string{"a", "a", "a"}},
 		{
 			name: "highest balance", strategy: strategyHighestBalance,
 			setup: func(app *application) {
@@ -156,6 +162,43 @@ func TestStrategies(t *testing.T) {
 			},
 			want: []string{"a"},
 		},
+		{
+			name: "lowest balance", strategy: strategyLowestBalance,
+			setup: func(app *application) {
+				app.runtime["a"].Balance = balanceSnapshot{
+					Status: "ok", Amount: 10, Unit: "display_unit", UpdatedAt: now,
+				}
+				app.runtime["b"].Balance = balanceSnapshot{
+					Status: "ok", Amount: 20, Unit: "display_unit", UpdatedAt: now,
+				}
+			},
+			want: []string{"a", "a"},
+		},
+		{
+			name: "lowest balance ties use order", strategy: strategyLowestBalance,
+			setup: func(app *application) {
+				app.runtime["a"].Balance = balanceSnapshot{
+					Status: "ok", Amount: 10, Unit: "display_unit", UpdatedAt: now,
+				}
+				app.runtime["b"].Balance = balanceSnapshot{
+					Status: "ok", Amount: 10, Unit: "display_unit", UpdatedAt: now,
+				}
+				app.runtime["a"].AssignedRequests = 99
+			},
+			want: []string{"a", "a"},
+		},
+		{
+			name: "lowest balance avoids unlimited", strategy: strategyLowestBalance,
+			setup: func(app *application) {
+				app.runtime["a"].Balance = balanceSnapshot{
+					Status: "ok", Unlimited: true, UpdatedAt: now,
+				}
+				app.runtime["b"].Balance = balanceSnapshot{
+					Status: "ok", Amount: 999, Unit: "display_unit", UpdatedAt: now,
+				}
+			},
+			want: []string{"b"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -173,6 +216,29 @@ func TestStrategies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLeastUsedRoutesInBatchesAndSkipsUnavailableAccount(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyLeastUsed, func() time.Time { return now },
+		testAccount("a", "https://a.invalid/v1", "key-a"),
+		testAccount("b", "https://b.invalid/v1", "key-b"),
+	)
+	for request := 0; request < leastUsedBatchSize; request++ {
+		account, ok := app.selectAccount(context.Background(), map[string]bool{})
+		if !ok || account.ID != "a" {
+			t.Fatalf("batch request %d selected %q ok=%v, want a", request+1, account.ID, ok)
+		}
+	}
+	account, ok := app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || account.ID != "b" {
+		t.Fatalf("next batch selected %q ok=%v, want b", account.ID, ok)
+	}
+	app.cooldownAccount(account)
+	account, ok = app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || account.ID != "a" {
+		t.Fatalf("unavailable batch account selected %q ok=%v, want a", account.ID, ok)
 	}
 }
 
@@ -209,6 +275,13 @@ func TestRuntimeHealthStateDoesNotBlockRouting(t *testing.T) {
 	selected, ok = app.selectAccount(context.Background(), map[string]bool{})
 	if !ok || selected.ID != "a" {
 		t.Fatalf("failed health prevented recovery routing: selected=%q ok=%v", selected.ID, ok)
+	}
+}
+
+func TestLowestBalanceStrategyIsValid(t *testing.T) {
+	cfg := storedConfig{Strategy: " LOWEST_BALANCE "}
+	if err := normalizeAndValidateConfig(&cfg); err != nil || cfg.Strategy != strategyLowestBalance {
+		t.Fatalf("lowest balance strategy rejected: strategy=%q err=%v", cfg.Strategy, err)
 	}
 }
 
@@ -261,7 +334,7 @@ func TestAdminCanRotateGatewayToken(t *testing.T) {
 	}
 }
 
-func TestHighestBalanceFallsBackToLeastUsed(t *testing.T) {
+func TestBalanceStrategiesFallBackToLeastUsed(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
 	app := newTestApplication(t, strategyHighestBalance, func() time.Time { return now },
 		testAccount("a", "https://a.invalid/v1", "key-a"),
@@ -298,6 +371,11 @@ func TestHighestBalanceFallsBackToLeastUsed(t *testing.T) {
 		t.Fatalf("unit mismatch did not fall back: %#v", status)
 	}
 
+	app.cfg.Strategy = strategyLowestBalance
+	status = app.status()
+	if status.EffectiveStrategy != strategyLeastUsed || status.FallbackReason != "balance_unit_mismatch" {
+		t.Fatalf("lowest balance unit mismatch did not fall back: %#v", status)
+	}
 }
 
 func TestQuotaBlocksOneAccountAndTriesNext(t *testing.T) {
@@ -339,6 +417,55 @@ func TestQuotaBlocksOneAccountAndTriesNext(t *testing.T) {
 	}
 }
 
+func TestExplicitAccountRestrictionBlocksButGeneric403DoesNot(t *testing.T) {
+	t.Run("explicit restriction", func(t *testing.T) {
+		var secondCalls atomic.Int32
+		first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"code":"account_suspended"}}`)
+		}))
+		defer first.Close()
+		second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			secondCalls.Add(1)
+			_, _ = io.WriteString(w, "ok")
+		}))
+		defer second.Close()
+		app := newTestApplication(t, strategyPriority, time.Now,
+			testAccount("a", first.URL, "key-a"), testAccount("b", second.URL, "key-b"))
+		response := proxyRequest(app, `{}`)
+		if response.Code != http.StatusOK || secondCalls.Load() != 1 || app.cfg.Accounts[0].BlockedReason != "restricted" {
+			t.Fatalf("restriction was not isolated: status=%d second=%d account=%#v",
+				response.Code, secondCalls.Load(), app.cfg.Accounts[0])
+		}
+		restarted, err := newApplication(app.configPath, app.client, time.Now)
+		if err != nil || restarted.cfg.Accounts[0].BlockedReason != "restricted" {
+			t.Fatalf("restriction did not survive restart: app=%#v err=%v", restarted, err)
+		}
+	})
+
+	t.Run("generic forbidden", func(t *testing.T) {
+		var secondCalls atomic.Int32
+		first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"code":"model_access_denied"}}`)
+		}))
+		defer first.Close()
+		second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			secondCalls.Add(1)
+			_, _ = io.WriteString(w, "unexpected")
+		}))
+		defer second.Close()
+		app := newTestApplication(t, strategyPriority, time.Now,
+			testAccount("a", first.URL, "key-a"), testAccount("b", second.URL, "key-b"))
+		response := proxyRequest(app, `{}`)
+		if response.Code != http.StatusForbidden || secondCalls.Load() != 0 || app.cfg.Accounts[0].BlockedReason != "" {
+			t.Fatalf("generic 403 blocked whole account: status=%d second=%d account=%#v",
+				response.Code, secondCalls.Load(), app.cfg.Accounts[0])
+		}
+	})
+}
+
 func TestVerifiedAndUnverified401Handling(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -376,11 +503,56 @@ func TestVerifiedAndUnverified401Handling(t *testing.T) {
 			if cooling != test.wantCooling {
 				t.Fatalf("cooling=%v, want %v", cooling, test.wantCooling)
 			}
+			if !test.verified {
+				now = app.runtime["a"].CooldownUntil
+				response = proxyRequest(app, `{}`)
+				if response.Code != http.StatusOK || app.cfg.Accounts[0].BlockedReason != "unauthorized" {
+					t.Fatalf("second unverified 401 did not block: status=%d account=%#v", response.Code, app.cfg.Accounts[0])
+				}
+			}
 		})
 	}
 }
 
-func TestConcurrentAccountResultsKeepBlocksAndUseCurrentVerification(t *testing.T) {
+func TestExplicitAccountTest401AlwaysBlocks(t *testing.T) {
+	app := newTestApplication(t, strategyPriority, time.Now,
+		testAccount("a", "https://a.invalid/v1", "key-a"),
+	)
+	app.handleAccountTestFailed(app.cfg.Accounts[0], http.StatusUnauthorized, nil)
+	if app.cfg.Accounts[0].BlockedReason != "unauthorized" {
+		t.Fatalf("explicit 401 did not block account: %#v", app.cfg.Accounts[0])
+	}
+}
+
+func TestUnverified401StrikeExpires(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://a.invalid/v1", "key-a"))
+	if action := app.handleAccountUnauthorized(app.cfg.Accounts[0]); action != "cooldown" {
+		t.Fatalf("first 401 action=%q", action)
+	}
+	now = now.Add(upstreamFailureReset + time.Second)
+	if action := app.handleAccountUnauthorized(app.cfg.Accounts[0]); action != "cooldown" || app.cfg.Accounts[0].BlockedReason != "" {
+		t.Fatalf("expired 401 strike action=%q account=%#v", action, app.cfg.Accounts[0])
+	}
+}
+
+func TestConcurrentUnverified401OnlyCountsOnce(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	startedAt := now
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://a.invalid/v1", "key-a"))
+	if action := app.handleAccountUnauthorized(app.cfg.Accounts[0], startedAt); action != "cooldown" {
+		t.Fatalf("first concurrent 401 action=%q", action)
+	}
+	now = now.Add(accountCooldown + time.Second)
+	if action := app.handleAccountUnauthorized(app.cfg.Accounts[0], startedAt); action != "ignored" ||
+		app.cfg.Accounts[0].BlockedReason != "" {
+		t.Fatalf("stale concurrent 401 action=%q account=%#v", action, app.cfg.Accounts[0])
+	}
+}
+
+func TestConcurrentAccountResultsKeepBlocksAndIgnoreStaleFailures(t *testing.T) {
 	app := newTestApplication(t, strategyPriority, time.Now,
 		testAccount("a", "https://a.invalid/v1", "key-a"),
 	)
@@ -391,14 +563,19 @@ func TestConcurrentAccountResultsKeepBlocksAndUseCurrentVerification(t *testing.
 		t.Fatalf("late success cleared block: %#v", app.cfg.Accounts[0])
 	}
 
-	app = newTestApplication(t, strategyPriority, time.Now,
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app = newTestApplication(t, strategyPriority, func() time.Time { return now },
 		testAccount("a", "https://a.invalid/v1", "key-a"),
 	)
 	selectedWhileUnverified := app.cfg.Accounts[0]
+	startedAt := now
+	now = now.Add(time.Second)
 	app.markAccountVerified(selectedWhileUnverified)
-	app.handleAccountUnauthorized(selectedWhileUnverified)
-	if app.cfg.Accounts[0].BlockedReason != "unauthorized" || !app.runtime["a"].CooldownUntil.IsZero() {
-		t.Fatalf("401 used stale verification state: account=%#v runtime=%#v", app.cfg.Accounts[0], app.runtime["a"])
+	now = now.Add(time.Second)
+	if action := app.handleAccountUnauthorized(selectedWhileUnverified, startedAt); action != "ignored" ||
+		app.cfg.Accounts[0].BlockedReason != "" || !app.runtime["a"].CooldownUntil.IsZero() {
+		t.Fatalf("stale 401 changed successful account: action=%q account=%#v runtime=%#v",
+			action, app.cfg.Accounts[0], app.runtime["a"])
 	}
 }
 
@@ -407,6 +584,7 @@ func TestOrdinary429CoolsAndNoNextForwardsLastError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "90")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(w, `{"error":{"code":"rate_limit_exceeded"}}`)
 	}))
@@ -415,25 +593,91 @@ func TestOrdinary429CoolsAndNoNextForwardsLastError(t *testing.T) {
 	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
 		testAccount("a", upstream.URL, "key-a"),
 	)
+	app.runtime["a"].UpstreamFailures = 2
+	app.runtime["a"].LastFailureAt = now.Add(-time.Second)
 	response := proxyRequest(app, `{}`)
 	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "rate_limit_exceeded") {
 		t.Fatalf("last error was not forwarded: status=%d body=%q", response.Code, response.Body.String())
 	}
-	if !now.Before(app.runtime["a"].CooldownUntil) || app.cfg.Accounts[0].BlockedReason != "" {
+	if !app.runtime["a"].CooldownUntil.Equal(now.Add(90*time.Second)) ||
+		app.runtime["a"].CooldownReason != "rate_limit" || app.runtime["a"].UpstreamFailures != 0 ||
+		app.cfg.Accounts[0].BlockedReason != "" {
 		t.Fatalf("ordinary 429 state is wrong: runtime=%#v account=%#v", app.runtime["a"], app.cfg.Accounts[0])
 	}
 	second := proxyRequest(app, `{}`)
 	if second.Code != http.StatusServiceUnavailable || calls.Load() != 1 {
 		t.Fatalf("cooldown was ignored: status=%d calls=%d", second.Code, calls.Load())
 	}
-	now = now.Add(accountCooldown + time.Second)
+	now = now.Add(91 * time.Second)
 	proxyRequest(app, `{}`)
 	if calls.Load() != 2 {
 		t.Fatalf("account was not retried after cooldown: calls=%d", calls.Load())
 	}
 }
 
-func TestEachAccountIsAttemptedAtMostOncePerRequest(t *testing.T) {
+func Test402And429DoNotBlockOnBodyBeforeSwitching(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		wantBlock  string
+		wantCool   bool
+	}{
+		{name: "payment required", statusCode: http.StatusPaymentRequired, wantBlock: "quota"},
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, wantCool: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			blockedBody, unblockBody := io.Pipe()
+			defer unblockBody.Close()
+			var firstCalls atomic.Int32
+			var secondCalls atomic.Int32
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host == "first.invalid" {
+					firstCalls.Add(1)
+					return &http.Response{
+						StatusCode: test.statusCode, Header: make(http.Header), Body: blockedBody, Request: r,
+					}, nil
+				}
+				secondCalls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader("second")), Request: r,
+				}, nil
+			})
+			now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+			app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+				testAccount("a", "https://first.invalid/v1", "key-a"),
+				testAccount("b", "https://second.invalid/v1", "key-b"),
+			)
+			app.client = &http.Client{Transport: transport}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- proxyRequest(app, `{}`) }()
+			var response *httptest.ResponseRecorder
+			select {
+			case response = <-done:
+			case <-time.After(2 * time.Second):
+				_ = unblockBody.Close()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+				}
+				t.Fatal("error response body blocked account switching")
+			}
+			if response.Code != http.StatusOK || response.Body.String() != "second" ||
+				firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+				t.Fatalf("response=%d body=%q first=%d second=%d",
+					response.Code, response.Body.String(), firstCalls.Load(), secondCalls.Load())
+			}
+			if app.cfg.Accounts[0].BlockedReason != test.wantBlock {
+				t.Fatalf("blocked reason=%q, want %q", app.cfg.Accounts[0].BlockedReason, test.wantBlock)
+			}
+			if cooling := now.Before(app.runtime["a"].CooldownUntil); cooling != test.wantCool {
+				t.Fatalf("cooling=%v, want %v", cooling, test.wantCool)
+			}
+		})
+	}
+}
+
+func TestRateLimitDoesNotRetrySameAccountPerRequest(t *testing.T) {
 	var firstCalls atomic.Int32
 	var secondCalls atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -460,62 +704,551 @@ func TestEachAccountIsAttemptedAtMostOncePerRequest(t *testing.T) {
 	}
 }
 
-func TestNetworkAnd5xxAreNeverReplayed(t *testing.T) {
+func TestSafeConnectionFailureRecoversWithinFiveAttempts(t *testing.T) {
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	app := newTestApplication(t, strategyPriority, time.Now,
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+		testAccount("b", "https://second.invalid/v1", "key-b"),
+	)
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "first.invalid" {
+			if firstCalls.Add(1) < 5 {
+				return nil, &net.OpError{Op: "dial", Err: errors.New("network unreachable")}
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader("first recovered")), Request: r}, nil
+		}
+		secondCalls.Add(1)
+		return nil, errors.New("second account must not be used")
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusOK || response.Body.String() != "first recovered" ||
+		firstCalls.Load() != 5 || secondCalls.Load() != 0 ||
+		app.runtime["a"].UpstreamFailures != 0 {
+		t.Fatalf("response=%d first=%d second=%d runtime=%#v body=%q",
+			response.Code, firstCalls.Load(), secondCalls.Load(), app.runtime["a"], response.Body.String())
+	}
+}
+
+func TestSafeConnectionFailureCountsOnceBeforeSwitching(t *testing.T) {
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+		testAccount("b", "https://second.invalid/v1", "key-b"),
+	)
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "first.invalid" {
+			firstCalls.Add(1)
+			return nil, &net.OpError{Op: "dial", Err: errors.New("network unreachable")}
+		}
+		secondCalls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("second")), Request: r}, nil
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusOK || response.Body.String() != "second" ||
+		firstCalls.Load() != 5 || secondCalls.Load() != 1 ||
+		!app.runtime["a"].CooldownUntil.Equal(now.Add(10*time.Second)) ||
+		app.runtime["a"].UpstreamFailures != 1 || app.cfg.Accounts[0].BlockedReason != "" {
+		t.Fatalf("response=%d first=%d second=%d runtime=%#v account=%#v",
+			response.Code, firstCalls.Load(), secondCalls.Load(), app.runtime["a"], app.cfg.Accounts[0])
+	}
+	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
+		t.Fatalf("failed upstream health=%q, want recent failure", health)
+	}
+}
+
+func TestSafeDNSFailureRetriesFiveTimes(t *testing.T) {
+	account := testAccount("a", "https://first.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	var calls atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, &net.DNSError{Err: "temporary lookup failure", Name: "first.invalid"}
+	})}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/v1/responses", strings.NewReader(`{}`))
+	if _, err := app.sendUpstream(request.Context(), request, []byte(`{}`), account); err == nil || calls.Load() != 5 {
+		t.Fatalf("dns retry err=%v calls=%d", err, calls.Load())
+	}
+}
+
+func TestPostServerErrorIsNotReplayed(t *testing.T) {
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+		testAccount("b", "https://second.invalid/v1", "key-b"),
+	)
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "first.invalid" {
+			firstCalls.Add(1)
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader("gateway failed")), Request: r}, nil
+		}
+		secondCalls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("second")), Request: r}, nil
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusBadGateway || response.Body.String() != "gateway failed" ||
+		firstCalls.Load() != 1 || secondCalls.Load() != 0 || app.runtime["a"].UpstreamFailures != 1 {
+		t.Fatalf("response=%d first=%d second=%d runtime=%#v body=%q",
+			response.Code, firstCalls.Load(), secondCalls.Load(), app.runtime["a"], response.Body.String())
+	}
+}
+
+func TestAmbiguousPostFailureIsNotReplayed(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		firstReply func(*http.Request) (*http.Response, error)
-		wantStatus int
+		name string
+		err  error
 	}{
-		{
-			name: "network error",
-			firstReply: func(*http.Request) (*http.Response, error) {
-				return nil, errors.New("network failed")
-			},
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name: "server error",
-			firstReply: func(r *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError, Header: make(http.Header),
-					Body: io.NopCloser(strings.NewReader("server failed")), Request: r,
-				}, nil
-			},
-			wantStatus: http.StatusInternalServerError,
-		},
+		{name: "connection reset after write", err: errors.New("connection reset after write")},
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			var firstCalls atomic.Int32
 			var secondCalls atomic.Int32
-			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Host == "first.invalid" {
-					return test.firstReply(r)
-				}
-				secondCalls.Add(1)
-				return &http.Response{
-					StatusCode: http.StatusOK, Header: make(http.Header),
-					Body: io.NopCloser(strings.NewReader("second")), Request: r,
-				}, nil
-			})
-			app := newTestApplication(t, strategyPriority, time.Now,
+			now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+			app := newTestApplication(t, strategyPriority, func() time.Time { return now },
 				testAccount("a", "https://first.invalid/v1", "key-a"),
 				testAccount("b", "https://second.invalid/v1", "key-b"),
 			)
-			app.client = &http.Client{Transport: transport}
+			app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host == "first.invalid" {
+					firstCalls.Add(1)
+					return nil, test.err
+				}
+				secondCalls.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader("second")), Request: r}, nil
+			})}
 			response := proxyRequest(app, `{}`)
-			if response.Code != test.wantStatus || secondCalls.Load() != 0 {
-				t.Fatalf("response=%d secondCalls=%d", response.Code, secondCalls.Load())
-			}
-			if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
-				t.Fatalf("failed upstream health=%q, want recent failure", health)
+			if response.Code != http.StatusBadGateway || firstCalls.Load() != 1 || secondCalls.Load() != 0 ||
+				!strings.Contains(response.Body.String(), "upstream_result_unknown") ||
+				app.runtime["a"].UpstreamFailures != 1 || app.runtime["a"].CooldownReason != "upstream_failures" ||
+				!app.runtime["a"].CooldownUntil.Equal(now.Add(10*time.Second)) {
+				t.Fatalf("ambiguous request status=%d first=%d second=%d body=%s",
+					response.Code, firstCalls.Load(), secondCalls.Load(), response.Body.String())
 			}
 		})
 	}
 }
 
+func TestAllSoftCooledAccountsUseControlledProbe(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+		testAccount("b", "https://second.invalid/v1", "key-b"),
+	)
+	for id, failures := range map[string]int{"a": 4, "b": 3} {
+		runtime := app.runtime[id]
+		runtime.UpstreamFailures = failures
+		runtime.LastFailureAt = now.Add(-maxSoftProbeDelay)
+		runtime.CooldownUntil = now.Add(upstreamFailureCooldown(failures))
+		runtime.CooldownReason = "upstream_failures"
+	}
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "first.invalid" {
+			firstCalls.Add(1)
+			return nil, errors.New("higher failure account must not be probed first")
+		}
+		secondCalls.Add(1)
+		app.mu.Lock()
+		probing := app.runtime["b"].ProbeInFlight
+		app.mu.Unlock()
+		if !probing {
+			return nil, errors.New("soft-cooled account was not marked as half-open")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("recovered")), Request: r}, nil
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusOK || response.Body.String() != "recovered" ||
+		firstCalls.Load() != 0 || secondCalls.Load() != 1 || app.runtime["b"].UpstreamFailures != 0 ||
+		app.runtime["b"].ProbeInFlight {
+		t.Fatalf("response=%d first=%d second=%d runtime=%#v body=%q",
+			response.Code, firstCalls.Load(), secondCalls.Load(), app.runtime["b"], response.Body.String())
+	}
+}
+
+func TestConcurrentRequestsWaitForHalfOpenProbe(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+	)
+	runtime := app.runtime["a"]
+	runtime.UpstreamFailures = 3
+	runtime.LastFailureAt = now.Add(-maxSoftProbeDelay)
+	runtime.CooldownUntil = now.Add(5 * time.Minute)
+	runtime.CooldownReason = "upstream_failures"
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			close(started)
+			<-release
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("response-" + strconv.Itoa(int(call)))), Request: r}, nil
+	})}
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- proxyRequest(app, `{}`) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("half-open probe did not start")
+	}
+	go func() { secondDone <- proxyRequest(app, `{}`) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.mu.Lock()
+		sequence := app.requestSequence
+		app.mu.Unlock()
+		if sequence >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second request did not enter the router")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case response := <-secondDone:
+		t.Fatalf("second request returned before probe completed: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent request duplicated half-open probe: calls=%d", calls.Load())
+	}
+	close(release)
+	for index, done := range []<-chan *httptest.ResponseRecorder{firstDone, secondDone} {
+		select {
+		case response := <-done:
+			if response.Code != http.StatusOK {
+				t.Fatalf("request %d status=%d body=%s", index+1, response.Code, response.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d did not finish", index+1)
+		}
+	}
+	if calls.Load() != 2 || app.runtime["a"].ProbeInFlight {
+		t.Fatalf("calls=%d runtime=%#v", calls.Load(), app.runtime["a"])
+	}
+}
+
+func TestHalfOpenHeadersReleaseWaitingRequests(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+	)
+	runtime := app.runtime["a"]
+	runtime.UpstreamFailures = 3
+	runtime.LastFailureAt = now.Add(-maxSoftProbeDelay)
+	runtime.CooldownUntil = now.Add(5 * time.Minute)
+	runtime.CooldownReason = "upstream_failures"
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	firstStarted := make(chan struct{})
+	allowHeaders := make(chan struct{})
+	var calls atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			close(firstStarted)
+			<-allowHeaders
+			return &http.Response{StatusCode: http.StatusOK,
+				Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: reader, Request: r}, nil
+		}
+		app.mu.Lock()
+		failures := app.runtime["a"].UpstreamFailures
+		reason := app.runtime["a"].CooldownReason
+		probing := app.runtime["a"].ProbeInFlight
+		app.mu.Unlock()
+		if failures != 3 || reason != "" || probing {
+			return nil, errors.New("response headers did not release the account as regular traffic")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("second")), Request: r}, nil
+	})}
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- proxyRequest(app, `{}`) }()
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("half-open request did not reach the upstream")
+	}
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondDone <- proxyRequest(app, `{}`) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.mu.Lock()
+		sequence := app.requestSequence
+		app.mu.Unlock()
+		if sequence >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second request did not enter the router")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case response := <-secondDone:
+		t.Fatalf("second request returned before the first response headers: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("half-open request was duplicated before response headers: calls=%d", calls.Load())
+	}
+	close(allowHeaders)
+	select {
+	case response := <-secondDone:
+		if response.Code != http.StatusOK || response.Body.String() != "second" {
+			t.Fatalf("second response status=%d body=%q", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		_ = writer.Close()
+		t.Fatal("waiting request remained blocked after successful response headers")
+	}
+	_, _ = io.WriteString(writer, "data: done\n\n")
+	_ = writer.Close()
+	select {
+	case response := <-firstDone:
+		if response.Code != http.StatusOK || response.Body.String() != "data: done\n\n" {
+			t.Fatalf("first response status=%d body=%q", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("half-open stream did not finish")
+	}
+	if calls.Load() != 2 || app.runtime["a"].ProbeInFlight {
+		t.Fatalf("calls=%d runtime=%#v", calls.Load(), app.runtime["a"])
+	}
+}
+
+func TestHalfOpenBodyFailureContinuesBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+	)
+	runtime := app.runtime["a"]
+	runtime.UpstreamFailures = 3
+	runtime.LastFailureAt = now.Add(-maxSoftProbeDelay)
+	runtime.CooldownUntil = now.Add(5 * time.Minute)
+	runtime.CooldownReason = "upstream_failures"
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK,
+			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:   &oneChunkThenError{chunk: []byte("data: partial\n\n")}, Request: r}, nil
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusOK || response.Body.String() != "data: partial\n\n" ||
+		runtime.UpstreamFailures != 4 || !runtime.CooldownUntil.Equal(now.Add(15*time.Minute)) ||
+		runtime.CooldownReason != "upstream_failures" || runtime.ProbeInFlight {
+		t.Fatalf("status=%d runtime=%#v body=%q", response.Code, runtime, response.Body.String())
+	}
+}
+
+func TestCanceledSoftWaitClosesPreviousResponse(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://first.invalid/v1", "key-a"),
+		testAccount("b", "https://second.invalid/v1", "key-b"),
+	)
+	secondRuntime := app.runtime["b"]
+	secondRuntime.UpstreamFailures = 1
+	secondRuntime.LastFailureAt = now
+	secondRuntime.CooldownUntil = now.Add(10 * time.Second)
+	secondRuntime.CooldownReason = "upstream_failures"
+	secondRuntime.ProbeInFlight = true
+	closed := make(chan struct{})
+	upstreamReturned := make(chan struct{})
+	body := &closeSignalBody{Reader: strings.NewReader("failed"), closed: closed}
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(upstreamReturned)
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: body, Request: r}, nil
+	})}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4000/v1/models", nil)
+	request.Host = listenAddress
+	request.Header.Set("Authorization", "Bearer gateway-token")
+	ctx, cancel := context.WithCancel(request.Context())
+	done := make(chan struct{})
+	go func() {
+		app.routes().ServeHTTP(httptest.NewRecorder(), request.WithContext(ctx))
+		close(done)
+	}()
+	select {
+	case <-upstreamReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first upstream response was not returned")
+	}
+	select {
+	case <-done:
+		t.Fatal("request returned instead of waiting for the soft-cooled account")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-closed:
+		t.Fatal("previous response was closed before the wait was canceled")
+	default:
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled request did not stop")
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("previous response body was not closed")
+	}
+}
+
+func TestOldProbeCannotClearNewRevisionProbe(t *testing.T) {
+	oldAccount := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, time.Now, oldAccount)
+	app.runtime["a"].ProbeInFlight = true
+	newAccount := oldAccount
+	newAccount.Revision++
+	app.cfg.Accounts[0] = newAccount
+	cooldownUntil := time.Now().Add(time.Minute)
+	app.runtime["a"] = &accountRuntime{
+		Revision: newAccount.Revision, ProbeInFlight: true, UpstreamFailures: 2,
+		CooldownReason: "upstream_failures", CooldownUntil: cooldownUntil,
+	}
+	changed := app.probeChanged
+	app.finishAccountProbe(oldAccount, true)
+	runtime := app.runtime["a"]
+	if !runtime.ProbeInFlight || runtime.UpstreamFailures != 2 || runtime.CooldownReason != "upstream_failures" ||
+		!runtime.CooldownUntil.Equal(cooldownUntil) {
+		t.Fatalf("old probe changed the new revision runtime: %#v", runtime)
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("old probe completion did not wake waiters")
+	}
+}
+
+func TestHalfOpenFailureAdvancesBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	runtime := app.runtime["a"]
+	runtime.UpstreamFailures = 3
+	runtime.LastFailureAt = now.Add(-maxSoftProbeDelay)
+	runtime.CooldownUntil = now.Add(5 * time.Minute)
+	runtime.CooldownReason = "upstream_failures"
+	var calls atomic.Int32
+	app.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("still failing")), Request: r}, nil
+	})}
+	response := proxyRequest(app, `{}`)
+	if response.Code != http.StatusBadGateway || response.Body.String() != "still failing" || calls.Load() != 1 ||
+		runtime.UpstreamFailures != 4 || !runtime.CooldownUntil.Equal(now.Add(15*time.Minute)) || runtime.ProbeInFlight {
+		t.Fatalf("status=%d calls=%d runtime=%#v body=%q", response.Code, calls.Load(), runtime, response.Body.String())
+	}
+}
+
+func TestUpstreamFailureCooldownBacksOffAndSuccessResets(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	wants := []time.Duration{10 * time.Second, 30 * time.Second, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
+	for index, want := range wants {
+		action := app.cooldownAccountForFailure(account)
+		if got := app.runtime["a"].CooldownUntil.Sub(now); got != want {
+			t.Fatalf("failure %d cooldown=%s, want %s", index+1, got, want)
+		}
+		if index >= 2 && action != "temporarily_disabled" {
+			t.Fatalf("failure %d action=%q", index+1, action)
+		} else if index < 2 && action != "cooldown" {
+			t.Fatalf("failure %d action=%q", index+1, action)
+		}
+		now = app.runtime["a"].CooldownUntil
+	}
+	now = app.runtime["a"].CooldownUntil.Add(upstreamFailureReset + time.Second)
+	app.cooldownAccountForFailure(account)
+	if runtime := app.runtime["a"]; runtime.UpstreamFailures != 1 || runtime.CooldownUntil.Sub(now) != 10*time.Second {
+		t.Fatalf("idle account did not reset backoff: %#v", runtime)
+	}
+	app.markAccountVerified(account)
+	if runtime := app.runtime["a"]; runtime.UpstreamFailures != 0 || runtime.CooldownReason != "" ||
+		!runtime.CooldownUntil.IsZero() || !runtime.LastFailureAt.IsZero() {
+		t.Fatalf("successful request did not reset backoff: %#v", runtime)
+	}
+}
+
+func TestInFlightFailuresOnlyCountOnce(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	startedAt := now
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	app.cooldownAccountForFailure(account, startedAt)
+	now = now.Add(11 * time.Second)
+	if action := app.cooldownAccountForFailure(account, startedAt); action != "ignored" {
+		t.Fatalf("stale in-flight failure action=%q", action)
+	}
+	if runtime := app.runtime["a"]; runtime.UpstreamFailures != 1 {
+		t.Fatalf("stale in-flight failure was counted twice: %#v", runtime)
+	}
+}
+
+func TestSuccessfulResponseIgnoresOlderInFlightFailure(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	startedAt := now
+	account := testAccount("a", "https://a.invalid/v1", "key-a")
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	now = now.Add(time.Second)
+	app.markAccountVerified(account)
+	now = now.Add(time.Second)
+	if action := app.cooldownAccountForFailure(account, startedAt); action != "ignored" {
+		t.Fatalf("old failure after success action=%q", action)
+	}
+	if runtime := app.runtime["a"]; runtime.UpstreamFailures != 0 || !runtime.CooldownUntil.IsZero() {
+		t.Fatalf("old failure changed recovered account: %#v", runtime)
+	}
+}
+
+func TestAccountResumeClearsTemporaryDisableWithoutProbe(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
+		testAccount("a", "https://a.invalid/v1", "key-a"))
+	for failure := range 3 {
+		app.cooldownAccountForFailure(app.cfg.Accounts[0])
+		if failure < 2 {
+			now = app.runtime["a"].CooldownUntil
+		}
+	}
+	if state := app.status().Accounts[0].State; state != "temporarily_disabled" {
+		t.Fatalf("state=%q, want temporarily_disabled", state)
+	}
+	response := adminJSON(app, http.MethodPost, "/admin/accounts/resume",
+		map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || app.status().Accounts[0].State != "available" ||
+		app.runtime["a"].UpstreamFailures != 0 || !app.runtime["a"].CooldownUntil.IsZero() {
+		t.Fatalf("resume status=%d runtime=%#v body=%s", response.Code, app.runtime["a"], response.Body.String())
+	}
+}
+
 func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
+	var firstCalls atomic.Int32
 	var secondCalls atomic.Int32
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Host == "second.invalid" {
+		if r.URL.Host == "first.invalid" {
+			firstCalls.Add(1)
+		} else if r.URL.Host == "second.invalid" {
 			secondCalls.Add(1)
 		}
 		return &http.Response{
@@ -524,7 +1257,8 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 			Body:       &oneChunkThenError{chunk: []byte("data: partial\n\n")}, Request: r,
 		}, nil
 	})
-	app := newTestApplication(t, strategyPriority, time.Now,
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now },
 		testAccount("a", "https://first.invalid/v1", "key-a"),
 		testAccount("b", "https://second.invalid/v1", "key-b"),
 	)
@@ -535,8 +1269,8 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != "data: partial\n\n" {
 		t.Fatalf("unexpected stream: status=%d body=%q", response.Code, response.Body.String())
 	}
-	if secondCalls.Load() != 0 {
-		t.Fatalf("started stream was replayed %d time(s)", secondCalls.Load())
+	if firstCalls.Load() != 1 || secondCalls.Load() != 0 {
+		t.Fatalf("started stream calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
 	}
 	if !response.Flushed {
 		t.Fatal("stream response was not flushed")
@@ -544,8 +1278,9 @@ func TestStartedSSEStreamIsNeverReplayed(t *testing.T) {
 	if strings.Contains(logs.String(), "data: partial") || !strings.Contains(logs.String(), "terminal=upstream_read_error") {
 		t.Fatalf("unsafe or incomplete stream log: %s", logs.String())
 	}
-	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentFailure {
-		t.Fatalf("truncated upstream stream health=%q, want recent failure", health)
+	if !app.runtime["a"].CooldownUntil.Equal(now.Add(10*time.Second)) || app.cfg.Accounts[0].Verified ||
+		app.status().Accounts[0].HealthState != accountHealthRecentFailure {
+		t.Fatalf("failed stream state: runtime=%#v account=%#v", app.runtime["a"], app.cfg.Accounts[0])
 	}
 }
 
@@ -575,13 +1310,13 @@ func TestCanceledRequestsDoNotChangeHealth(t *testing.T) {
 		}
 	})
 
-	t.Run("admin test", func(t *testing.T) {
+	t.Run("admin models", func(t *testing.T) {
 		app := newApp(t)
-		body, err := json.Marshal(testRequest{AccountID: "a", TestModel: "test-model", AllowInsecureHTTP: boolPointer(true)})
+		body, err := json.Marshal(accountProbeRequest{AccountID: "a", AllowInsecureHTTP: boolPointer(true)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/admin/test", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4000/admin/models", bytes.NewReader(body))
 		request.Host = listenAddress
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", "http://127.0.0.1:4000")
@@ -590,9 +1325,43 @@ func TestCanceledRequestsDoNotChangeHealth(t *testing.T) {
 		cancel()
 		app.routes().ServeHTTP(httptest.NewRecorder(), request.WithContext(ctx))
 		if health := app.status().Accounts[0].HealthState; health != accountHealthRecentSuccess {
-			t.Fatalf("canceled admin test changed health to %q", health)
+			t.Fatalf("canceled admin models changed health to %q", health)
 		}
 	})
+}
+
+func TestForwardResponseIdleTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	response := &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: reader,
+	}
+	done := make(chan error, 1)
+	go func() { done <- forwardResponseWithIdleTimeout(httptest.NewRecorder(), response, 10*time.Millisecond) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errUpstreamIdleTimeout) {
+			t.Fatalf("idle response error=%v, want timeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle response did not time out")
+	}
+}
+
+func TestForwardResponseDownstreamWriteFailureIsLoggedWithoutUpstreamFailure(t *testing.T) {
+	var logs bytes.Buffer
+	app := &application{logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("response")),
+	}
+	if err := app.forwardResponse(&writeErrorResponseWriter{}, response, 1, "account", 1, time.Now()); err != nil {
+		t.Fatalf("downstream write failure was returned as upstream failure: %v", err)
+	}
+	if !strings.Contains(logs.String(), "terminal=downstream_write_error") {
+		t.Fatalf("downstream write failure was not logged: %s", logs.String())
+	}
 }
 
 func TestAdminSaveKeepsExistingKeysGeneratesIDsAndRedacts(t *testing.T) {
@@ -689,12 +1458,11 @@ func TestSavedKeyCannotMoveToDifferentOriginImplicitly(t *testing.T) {
 		calls.Add(1)
 		return nil, errors.New("must not send saved key")
 	})}
-	test := testRequest{
+	test := accountProbeRequest{
 		AccountID: "a",
 		Candidate: &accountInput{BaseURL: "https://attacker.invalid/v1"},
-		TestModel: "test-model",
 	}
-	response = adminJSON(app, http.MethodPost, "/admin/test", test, "http://127.0.0.1:4000")
+	response = adminJSON(app, http.MethodPost, "/admin/models", test, "http://127.0.0.1:4000")
 	if response.Code != http.StatusBadRequest || calls.Load() != 0 ||
 		!strings.Contains(response.Body.String(), "重新填写 API Key") {
 		t.Fatalf("cross-origin test status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
@@ -1351,7 +2119,7 @@ func TestConvertNewAPIQuotaDisplayTypes(t *testing.T) {
 	}
 }
 
-func TestHighestBalanceRefreshesStaleAccountsBeforeSelection(t *testing.T) {
+func TestBalanceStrategiesRefreshStaleAccountsBeforeSelection(t *testing.T) {
 	var usageCalls atomic.Int32
 	var selfCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1396,6 +2164,20 @@ func TestHighestBalanceRefreshesStaleAccountsBeforeSelection(t *testing.T) {
 	}
 	if app.status().EffectiveStrategy != strategyHighestBalance {
 		t.Fatalf("fresh comparable balances did not enable highest_balance: %#v", app.status())
+	}
+
+	app.cfg.Strategy = strategyLowestBalance
+	app.runtime["a"].Balance = balanceSnapshot{}
+	app.runtime["b"].Balance = balanceSnapshot{}
+	usageCalls.Store(0)
+	selfCalls.Store(0)
+	account, ok = app.selectAccount(context.Background(), map[string]bool{})
+	if !ok || account.ID != "a" || usageCalls.Load() != 2 || selfCalls.Load() != 2 {
+		t.Fatalf("lowest balance selection=%q ok=%v usageCalls=%d selfCalls=%d",
+			account.ID, ok, usageCalls.Load(), selfCalls.Load())
+	}
+	if app.status().EffectiveStrategy != strategyLowestBalance {
+		t.Fatalf("fresh comparable balances did not enable lowest_balance: %#v", app.status())
 	}
 }
 
@@ -1931,7 +2713,7 @@ func TestBalanceTestIsIndependentAndDoesNotLeakSecrets(t *testing.T) {
 	account.NewAPIUserID = 42
 	account.NewAPISecret = "access-secret"
 	app := newTestApplication(t, strategyPriority, time.Now, account)
-	response := adminJSON(app, http.MethodPost, "/admin/balances/test", testRequest{AccountID: "a"}, "http://127.0.0.1:4000")
+	response := adminJSON(app, http.MethodPost, "/admin/balances/test", accountProbeRequest{AccountID: "a"}, "http://127.0.0.1:4000")
 	body := response.Body.String()
 	if response.Code != http.StatusOK || modelCalls.Load() != 0 ||
 		!strings.Contains(body, `"errorStage":"account_quota"`) ||
@@ -1993,7 +2775,7 @@ func TestHighestBalanceRoutingUsesShortRefreshBudget(t *testing.T) {
 	}
 	firstCalls := calls.Load()
 	selected, ok = app.selectAccount(context.Background(), map[string]bool{})
-	if !ok || selected.ID != "b" || calls.Load() != firstCalls {
+	if !ok || selected.ID != "a" || calls.Load() != firstCalls {
 		t.Fatalf("routing backoff selected=%q ok=%v calls=%d wantCalls=%d", selected.ID, ok, calls.Load(), firstCalls)
 	}
 	releaseAll()
@@ -2094,114 +2876,93 @@ func TestPreparedRouteRefreshIgnoresLaterBackoff(t *testing.T) {
 	}
 }
 
-func TestAdminTestInheritsSavedKeyAndOnlyMatchingCandidateVerifies(t *testing.T) {
-	var balanceCalls atomic.Int32
-	var savedTestStatus atomic.Int32
+func TestAdminModelsUsesSavedKeyAndPreservesAccountState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer saved-key" {
-			t.Fatalf("wrong authorization: %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/v1/responses":
-			if status := savedTestStatus.Load(); status != 0 {
-				w.WriteHeader(int(status))
-				_, _ = io.WriteString(w, `{"error":{"message":"test failed"}}`)
-				return
-			}
-			_, _ = io.WriteString(w, `{}`)
-		case "/api/usage/token/":
-			balanceCalls.Add(1)
-			_, _ = io.WriteString(w, `{"data":{"total_available":500000}}`)
-		case "/api/status":
-			balanceCalls.Add(1)
-			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
-		default:
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	account := testAccount("a", server.URL+"/v1", "saved-key")
-	account.BlockedReason = "quota"
-	app := newTestApplication(t, strategyPriority, time.Now, account)
-	request := testRequest{
-		AccountID: "a", Candidate: &accountInput{BaseURL: server.URL + "/v1"},
-		TestModel: "test-model", AllowInsecureHTTP: boolPointer(true),
-	}
-	response := adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) ||
-		strings.Contains(response.Body.String(), `"balance"`) || balanceCalls.Load() != 0 {
-		t.Fatalf("test failed: status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !app.cfg.Accounts[0].Verified || app.cfg.Accounts[0].BlockedReason != "" {
-		t.Fatalf("matching test did not clear state: %#v", app.cfg.Accounts[0])
-	}
-	if health := app.status().Accounts[0].HealthState; health != accountHealthRecentSuccess {
-		t.Fatalf("matching test health=%q, want recent success", health)
-	}
-	request.Candidate = &accountInput{BaseURL: server.URL + "/v1", NewAPIAuthMode: newAPIAuthPassword}
-	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) || balanceCalls.Load() != 0 {
-		t.Fatalf("incomplete balance authentication blocked model test: status=%d body=%s calls=%d",
-			response.Code, response.Body.String(), balanceCalls.Load())
-	}
-
-	app.cfg.Accounts[0].Verified = false
-	app.runtime["a"].HealthState = ""
-	app.runtime["a"].HealthCheckedAt = time.Time{}
-	var candidateFails atomic.Bool
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/responses" {
-			if candidateFails.Load() {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			_, _ = io.WriteString(w, `{}`)
 			return
 		}
-		http.NotFound(w, r)
+		if r.Header.Get("Authorization") != "Bearer saved-key" {
+			t.Errorf("wrong authorization: %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("Accept") != "application/json" {
+			t.Errorf("wrong accept header: %q", r.Header.Get("Accept"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":" gpt-a "},"gpt-b",{"id":"gpt-a"}," ",{"id":"gpt-c"},{"id":"leak-saved-key"},{"id":"leak-access-secret"},{"name":"ignored"},42]}`)
 	}))
-	defer other.Close()
-	request.Candidate = &accountInput{BaseURL: other.URL + "/v1", APIKey: "other-key"}
-	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || app.cfg.Accounts[0].Verified ||
-		app.status().Accounts[0].HealthState != accountHealthUnverified {
-		t.Fatalf("unsaved candidate changed saved verification: status=%d account=%#v", response.Code, app.cfg.Accounts[0])
+	defer server.Close()
+	now := time.Date(2026, 7, 12, 9, 0, 0, 0, time.UTC)
+	account := testAccount("a", server.URL+"/v1", "saved-key")
+	account.NewAPIAuthMode = newAPIAuthAccessToken
+	account.NewAPIUserID = 42
+	account.NewAPISecret = "access-secret"
+	account.Verified = true
+	account.BlockedReason = "quota"
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	app.runtime["a"].AssignedRequests = 7
+	app.runtime["a"].LastUsedAt = now.Add(-time.Minute)
+	app.runtime["a"].CooldownUntil = now.Add(time.Minute)
+	app.runtime["a"].HealthState = accountHealthRecentFailure
+	app.runtime["a"].HealthCheckedAt = now
+	request := accountProbeRequest{
+		AccountID: "a", Candidate: &accountInput{BaseURL: server.URL + "/v1"},
+		AllowInsecureHTTP: boolPointer(true),
 	}
-	candidateFails.Store(true)
-	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":false`) ||
-		app.status().Accounts[0].HealthState != accountHealthUnverified {
-		t.Fatalf("failing unsaved candidate changed saved health: status=%d body=%s", response.Code, response.Body.String())
+	response := adminJSON(app, http.MethodPost, "/admin/models", request, "http://127.0.0.1:4000")
+	var result struct {
+		OK     bool     `json:"ok"`
+		Models []string `json:"models"`
 	}
-
-	savedTestStatus.Store(http.StatusServiceUnavailable)
-	request.Candidate = nil
-	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":false`) ||
-		app.status().Accounts[0].HealthState != accountHealthRecentFailure {
-		t.Fatalf("failing saved test did not update health: status=%d body=%s", response.Code, response.Body.String())
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode models response: %v body=%s", err, response.Body.String())
 	}
-
-	app.runtime["a"].HealthState = accountHealthRecentSuccess
-	app.runtime["a"].HealthCheckedAt = time.Now()
-	app.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK, Header: make(http.Header),
-			Body:       &oneChunkThenError{chunk: []byte(`{}`)}, Request: request,
-		}, nil
-	})}
-	response = adminJSON(app, http.MethodPost, "/admin/test", request, "http://127.0.0.1:4000")
-	if response.Code != http.StatusBadGateway || app.status().Accounts[0].HealthState != accountHealthRecentFailure {
-		t.Fatalf("truncated saved test did not update health: status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK || !result.OK || strings.Join(result.Models, ",") != "gpt-a,gpt-b,gpt-c" {
+		t.Fatalf("models status=%d result=%#v body=%s", response.Code, result, response.Body.String())
+	}
+	if !app.cfg.Accounts[0].Verified || app.cfg.Accounts[0].BlockedReason != "quota" ||
+		app.runtime["a"].AssignedRequests != 7 || !app.runtime["a"].LastUsedAt.Equal(now.Add(-time.Minute)) ||
+		!app.runtime["a"].CooldownUntil.Equal(now.Add(time.Minute)) ||
+		app.runtime["a"].HealthState != accountHealthRecentFailure || !app.runtime["a"].HealthCheckedAt.Equal(now) {
+		t.Fatalf("models probe changed account state: account=%#v runtime=%#v", app.cfg.Accounts[0], app.runtime["a"])
 	}
 }
 
-func TestAccountResetClearsBlockAndRefreshesBalance(t *testing.T) {
+func TestParseUpstreamModelsDoesNotHideModelsForShortKeys(t *testing.T) {
+	models, err := parseUpstreamModels([]byte(`{"data":[{"id":"test-model"},{"id":"test"}]}`), "test")
+	if err != nil || strings.Join(models, ",") != "test-model" {
+		t.Fatalf("short key filtering models=%v err=%v", models, err)
+	}
+}
+
+func TestAccountResetVerifiesRequestBeforeClearingBlock(t *testing.T) {
+	var modelCalls atomic.Int32
+	var responseCalls atomic.Int32
 	var balanceCalls atomic.Int32
+	var probeStage atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/models":
+			modelCalls.Add(1)
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer key-a" ||
+				!probeStage.CompareAndSwap(0, 1) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":[{"id":"recovery-model"},{"id":"other-model"}]}`)
+		case "/v1/responses":
+			responseCalls.Add(1)
+			var payload map[string]any
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer key-a" ||
+				!probeStage.CompareAndSwap(1, 2) || json.NewDecoder(r.Body).Decode(&payload) != nil ||
+				payload["model"] != "recovery-model" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"message":"bad test request"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
 		case "/api/usage/token/":
 			balanceCalls.Add(1)
 			_, _ = io.WriteString(w, `{"data":{"total_available":500000}}`)
@@ -2214,20 +2975,203 @@ func TestAccountResetClearsBlockAndRefreshesBalance(t *testing.T) {
 	defer server.Close()
 	account := testAccount("a", server.URL+"/v1", "key-a")
 	account.BlockedReason = "quota"
-	app := newTestApplication(t, strategyPriority, time.Now, account)
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+	app.runtime["a"].CooldownUntil = now.Add(accountCooldown)
 	app.runtime["a"].HealthState = accountHealthRecentFailure
-	app.runtime["a"].HealthCheckedAt = time.Now()
+	app.runtime["a"].HealthCheckedAt = now
 	staleRequestAccount := app.cfg.Accounts[0]
-	response := adminJSON(app, http.MethodPost, "/admin/accounts/reset", map[string]string{"id": "a"}, "http://127.0.0.1:4000")
-	if response.Code != http.StatusOK || app.cfg.Accounts[0].BlockedReason != "" || balanceCalls.Load() != 1 ||
-		app.runtime["a"].Balance.Status != "ok" || app.cfg.Accounts[0].Revision != staleRequestAccount.Revision+1 ||
-		app.status().Accounts[0].HealthState != accountHealthUnverified {
-		t.Fatalf("reset failed: status=%d account=%#v runtime=%#v calls=%d body=%s",
-			response.Code, app.cfg.Accounts[0], app.runtime["a"], balanceCalls.Load(), response.Body.String())
+	response := adminJSON(app, http.MethodPost, "/admin/accounts/reset",
+		map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+	if response.Code != http.StatusOK || modelCalls.Load() != 1 || responseCalls.Load() != 1 ||
+		probeStage.Load() != 2 || balanceCalls.Load() != 1 ||
+		!app.cfg.Accounts[0].Verified || app.cfg.Accounts[0].BlockedReason != "" ||
+		!app.runtime["a"].CooldownUntil.IsZero() || app.runtime["a"].Balance.Status != "ok" ||
+		app.cfg.Accounts[0].Revision != staleRequestAccount.Revision+1 ||
+		app.status().Accounts[0].HealthState != accountHealthRecentSuccess {
+		t.Fatalf("reset failed: status=%d account=%#v runtime=%#v models=%d responses=%d balances=%d stage=%d body=%s",
+			response.Code, app.cfg.Accounts[0], app.runtime["a"], modelCalls.Load(), responseCalls.Load(),
+			balanceCalls.Load(), probeStage.Load(), response.Body.String())
 	}
 	app.blockAccount(staleRequestAccount, "quota")
 	if app.cfg.Accounts[0].BlockedReason != "" {
 		t.Fatalf("pre-reset request reblocked account: %#v", app.cfg.Accounts[0])
+	}
+}
+
+func TestAccountResetModelsFailureOrEmptyDoesNotChangeState(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{name: "request failed", statusCode: http.StatusServiceUnavailable, body: `{"error":"unavailable"}`},
+		{name: "empty list", statusCode: http.StatusOK, body: `{"data":[]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var modelCalls atomic.Int32
+			var responseCalls atomic.Int32
+			var balanceCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/models":
+					modelCalls.Add(1)
+					w.WriteHeader(test.statusCode)
+					_, _ = io.WriteString(w, test.body)
+				case "/v1/responses":
+					responseCalls.Add(1)
+				case "/api/usage/token/", "/api/status":
+					balanceCalls.Add(1)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+			account := testAccount("a", server.URL+"/v1", "key-a")
+			account.BlockedReason = "quota"
+			app := newTestApplication(t, strategyPriority, func() time.Time { return now }, account)
+			app.runtime["a"].CooldownUntil = now.Add(accountCooldown)
+			app.runtime["a"].HealthState = accountHealthRecentFailure
+			app.runtime["a"].HealthCheckedAt = now
+			app.runtime["a"].AssignedRequests = 3
+			app.runtime["a"].Balance = balanceSnapshot{Status: "ok", Amount: 1.46, Unit: "USD", UpdatedAt: now}
+			if err := saveConfig(app.configPath, app.cfg); err != nil {
+				t.Fatal(err)
+			}
+			beforeAccount := app.cfg.Accounts[0]
+			beforeRuntime := *app.runtime["a"]
+			response := adminJSON(app, http.MethodPost, "/admin/accounts/reset",
+				map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+			if response.Code != http.StatusBadGateway || modelCalls.Load() != 1 ||
+				responseCalls.Load() != 0 || balanceCalls.Load() != 0 ||
+				app.cfg.Accounts[0] != beforeAccount || *app.runtime["a"] != beforeRuntime {
+				t.Fatalf("models failure changed state: status=%d account=%#v runtime=%#v models=%d responses=%d balances=%d body=%s",
+					response.Code, app.cfg.Accounts[0], app.runtime["a"], modelCalls.Load(),
+					responseCalls.Load(), balanceCalls.Load(), response.Body.String())
+			}
+			persisted, found, err := loadConfig(app.configPath)
+			if err != nil || !found || persisted.Accounts[0] != beforeAccount {
+				t.Fatalf("models failure changed persisted state: found=%v cfg=%#v err=%v", found, persisted, err)
+			}
+		})
+	}
+}
+
+func TestAccountResetFailedRequestBlocksQuotaDespitePositiveBalance(t *testing.T) {
+	var modelCalls atomic.Int32
+	var responseCalls atomic.Int32
+	var balanceCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			modelCalls.Add(1)
+			_, _ = io.WriteString(w, `{"data":[{"id":"recovery-model"}]}`)
+		case "/v1/responses":
+			responseCalls.Add(1)
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = io.WriteString(w, `{"error":{"message":"余额不足"}}`)
+		case "/api/usage/token/", "/api/status":
+			balanceCalls.Add(1)
+			http.Error(w, "balance must not be refreshed", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "key-a")
+	account.Verified = true
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	app.runtime["a"].Balance = balanceSnapshot{
+		Status: "ok", Amount: 1.46, Unit: "USD", UpdatedAt: time.Now(),
+	}
+	if err := saveConfig(app.configPath, app.cfg); err != nil {
+		t.Fatal(err)
+	}
+	originalRevision := app.cfg.Accounts[0].Revision
+	response := adminJSON(app, http.MethodPost, "/admin/accounts/reset", map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+	if response.Code != http.StatusBadGateway || modelCalls.Load() != 1 || responseCalls.Load() != 1 || balanceCalls.Load() != 0 ||
+		app.cfg.Accounts[0].BlockedReason != "quota" || !app.cfg.Accounts[0].Verified ||
+		app.cfg.Accounts[0].Revision != originalRevision || app.runtime["a"].Balance.Amount != 1.46 ||
+		app.status().Accounts[0].HealthState != accountHealthRecentFailure ||
+		!strings.Contains(response.Body.String(), "已更新账号状态") {
+		t.Fatalf("failed reset did not block quota: status=%d account=%#v runtime=%#v models=%d responses=%d balances=%d body=%s",
+			response.Code, app.cfg.Accounts[0], app.runtime["a"], modelCalls.Load(), responseCalls.Load(),
+			balanceCalls.Load(), response.Body.String())
+	}
+	persisted, found, err := loadConfig(app.configPath)
+	if err != nil || !found || persisted.Accounts[0].BlockedReason != "quota" ||
+		persisted.Accounts[0].Revision != originalRevision {
+		t.Fatalf("failed reset changed persisted state: found=%v cfg=%#v err=%v", found, persisted, err)
+	}
+}
+
+func TestConcurrentAccountResetSendsOneProbe(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var modelCalls atomic.Int32
+	var responseCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			modelCalls.Add(1)
+			_, _ = io.WriteString(w, `{"data":[{"id":"recovery-model"}]}`)
+		case "/v1/responses":
+			responseCalls.Add(1)
+			entered <- struct{}{}
+			<-release
+			_, _ = io.WriteString(w, `{}`)
+		case "/api/usage/token/":
+			_, _ = io.WriteString(w, `{"data":{"total_available":500000}}`)
+		case "/api/status":
+			_, _ = io.WriteString(w, `{"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := testAccount("a", server.URL+"/v1", "key-a")
+	account.BlockedReason = "quota"
+	app := newTestApplication(t, strategyPriority, time.Now, account)
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		firstDone <- adminJSON(app, http.MethodPost, "/admin/accounts/reset",
+			map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("first recovery probe did not start")
+	}
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		secondDone <- adminJSON(app, http.MethodPost, "/admin/accounts/reset",
+			map[string]string{"id": "a"}, "http://127.0.0.1:4000")
+	}()
+	select {
+	case second := <-secondDone:
+		if second.Code != http.StatusConflict || modelCalls.Load() != 1 || responseCalls.Load() != 1 {
+			close(release)
+			t.Fatalf("concurrent reset status=%d models=%d responses=%d body=%s",
+				second.Code, modelCalls.Load(), responseCalls.Load(), second.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("concurrent reset started a duplicate probe")
+	}
+	close(release)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusOK || modelCalls.Load() != 1 || responseCalls.Load() != 1 {
+			t.Fatalf("first reset status=%d models=%d responses=%d body=%s",
+				first.Code, modelCalls.Load(), responseCalls.Load(), first.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first reset did not finish")
 	}
 }
 
@@ -2277,6 +3221,89 @@ func TestCompletelyUnavailablePoolReturns503(t *testing.T) {
 	response := proxyRequest(app, `{}`)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestServeWithStopLoopCancelsActiveRequest(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(requestStarted)
+		<-request.Context().Done()
+		close(requestCanceled)
+	})}
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+	clientDone := make(chan struct{})
+	loop := func(requestStop func(), serverDone <-chan struct{}) error {
+		go func() {
+			defer close(clientDone)
+			response, requestErr := http.Get("http://" + listener.Addr().String())
+			if requestErr == nil {
+				response.Body.Close()
+			}
+		}()
+		select {
+		case <-requestStarted:
+		case <-time.After(time.Second):
+			t.Fatal("request did not reach the server")
+		}
+		requestStop()
+		select {
+		case <-serverDone:
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+		return nil
+	}
+	if err := serveWithStopLoop(server, listener, loop); err != nil {
+		t.Fatalf("serveWithStopLoop returned %v", err)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("active request context was not canceled")
+	}
+	select {
+	case <-clientDone:
+	case <-time.After(time.Second):
+		t.Fatal("client did not finish after shutdown")
+	}
+}
+
+func TestServeWithStopLoopRejectsUnexpectedLoopReturn(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.NotFoundHandler()}
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+	err = serveWithStopLoop(server, listener, func(func(), <-chan struct{}) error { return nil })
+	if !errors.Is(err, errSystemTrayStopped) {
+		t.Fatalf("serveWithStopLoop returned %v", err)
+	}
+}
+
+func TestServeWithStopLoopReturnsLoopError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.NotFoundHandler()}
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+	want := errors.New("tray loop failed")
+	err = serveWithStopLoop(server, listener, func(func(), <-chan struct{}) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatalf("serveWithStopLoop returned %v", err)
 	}
 }
 
@@ -2471,6 +3498,41 @@ func TestStructuredQuotaError(t *testing.T) {
 	}
 }
 
+func TestStructuredAccountRestrictionError(t *testing.T) {
+	for _, test := range []struct {
+		body string
+		want bool
+	}{
+		{`{"error":{"code":"account_suspended"}}`, true},
+		{`{"details":{"reason":"organization-deactivated"}}`, true},
+		{`{"error":{"message":"账号已封禁"}}`, true},
+		{`{"error":{"code":"model_access_denied"}}`, false},
+		{`{"error":{"message":"permission denied"}}`, false},
+	} {
+		if got := structuredAccountRestrictionError([]byte(test.body)); got != test.want {
+			t.Fatalf("structuredAccountRestrictionError(%s)=%v, want %v", test.body, got, test.want)
+		}
+	}
+}
+
+func TestRetryAfterDuration(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"90", 90 * time.Second},
+		{now.Add(2 * time.Minute).Format(http.TimeFormat), 2 * time.Minute},
+		{"invalid", accountCooldown},
+		{"999999", maxRetryAfter},
+		{"9223372036", maxRetryAfter},
+	} {
+		if got := retryAfterDuration(test.value, now); got != test.want {
+			t.Fatalf("retryAfterDuration(%q)=%s, want %s", test.value, got, test.want)
+		}
+	}
+}
+
 func TestRedactSecretsHandlesOverlappingValues(t *testing.T) {
 	message := redactSecrets("credential abc123", "abc", "abc123")
 	if message != "credential [已隐藏]" {
@@ -2491,7 +3553,7 @@ func newTestApplication(t *testing.T, strategy string, now func() time.Time, acc
 	}
 	app := &application{
 		cfg: storedConfig{
-			Version: configVersion, Accounts: accounts, Strategy: strategy, TestModel: "test-model",
+			Version: configVersion, Accounts: accounts, Strategy: strategy,
 			AllowInsecureHTTP: true, GatewayToken: "gateway-token",
 		},
 		configPath: filepath.Join(t.TempDir(), "config.dat"),
@@ -2499,6 +3561,8 @@ func newTestApplication(t *testing.T, strategy string, now func() time.Time, acc
 		balanceTimeout: balanceRefreshTime, balanceRoutingTimeout: balanceRoutingTime,
 		runtime:            make(map[string]*accountRuntime),
 		balanceRefreshGate: make(chan struct{}, 1),
+		recovering:         make(map[string]bool),
+		probeChanged:       make(chan struct{}),
 	}
 	for _, account := range accounts {
 		app.runtime[account.ID] = &accountRuntime{Revision: account.Revision}
@@ -2544,6 +3608,34 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 type oneChunkThenError struct {
 	chunk []byte
 	done  bool
+}
+
+type closeSignalBody struct {
+	io.Reader
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (body *closeSignalBody) Close() error {
+	body.once.Do(func() { close(body.closed) })
+	return nil
+}
+
+type writeErrorResponseWriter struct {
+	header http.Header
+}
+
+func (w *writeErrorResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (*writeErrorResponseWriter) WriteHeader(int) {}
+
+func (*writeErrorResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("downstream write failed")
 }
 
 func (body *oneChunkThenError) Read(destination []byte) (int, error) {
