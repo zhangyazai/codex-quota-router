@@ -1,27 +1,19 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"errors"
 	"io"
 	"log"
-	"net"
-	"net/http"
-	"os"
 	"os/exec"
-	"os/signal"
 	"runtime"
-	"sync"
-	"syscall"
-	"time"
 
 	"fyne.io/systray"
 )
 
 const (
-	managementURL       = "http://" + listenAddress + "/"
-	trayShutdownTimeout = 5 * time.Second
+	managementURL = "http://" + listenAddress + "/"
+	projectURL     = "https://github.com/zhangyazai/codex-quota-router"
 
 	trayRegularPNGBase64  = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiklEQVR42u3XSw6AMAgE0F7Gk3n8HkLjzpjaQhk+VUjcOi+pIC0li1nbXo/e4xKqipkNFyOkwSIIOpyNQIZexQKgw++AIaL3EkmRj+LfgNE5IgFNhEbbuQOebegCIA+lBHDOzxSghSDNArMZkIA3hOmPqIVAf4TsjQjdAesspSHW8jAXkxBXs0/XCZdB7ZNjHgT5AAAAAElFTkSuQmCC"
 	trayTemplatePNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAO0lEQVR42mNgGAWjYBSMAPB/oC3/Ty1DKMGjDhjaDhjwRDiks+EoGPrxN2iy0WgpOOqA0WJ0FIyC4QsA6GqTbbQssMIAAAAASUVORK5CYII="
@@ -34,99 +26,6 @@ var (
 	trayTemplatePNG      = decodeTrayIcon(trayTemplatePNGBase64)
 	trayWindowsICO       = decodeTrayIcon(trayWindowsICOBase64)
 )
-
-func serve(server *http.Server, listener net.Listener) error {
-	loop := runHeadless
-	if trayAvailable() {
-		loop = runSystemTray
-	}
-	return serveWithStopLoop(server, listener, loop)
-}
-
-func serveWithStopLoop(server *http.Server, listener net.Listener, loop func(func(), <-chan struct{}) error) error {
-	baseContext, cancelRequests := context.WithCancel(context.Background())
-	defer cancelRequests()
-	server.BaseContext = func(net.Listener) context.Context {
-		return baseContext
-	}
-
-	serverDone := make(chan struct{})
-	var serveErr error
-	go func() {
-		serveErr = server.Serve(listener)
-		close(serverDone)
-	}()
-
-	stopRequested := make(chan struct{})
-	shutdownDone := make(chan struct{})
-	var stopOnce sync.Once
-	requestStop := func() {
-		stopOnce.Do(func() {
-			close(stopRequested)
-			go func() {
-				defer close(shutdownDone)
-				cancelRequests()
-				shutdownContext, cancel := context.WithTimeout(context.Background(), trayShutdownTimeout)
-				defer cancel()
-				if err := server.Shutdown(shutdownContext); err != nil {
-					_ = server.Close()
-				}
-			}()
-		})
-	}
-	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-	go func() {
-		select {
-		case <-signalContext.Done():
-			requestStop()
-		case <-serverDone:
-		}
-	}()
-
-	loopErr := loop(requestStop, serverDone)
-	loopFailed := false
-	if loopErr != nil {
-		select {
-		case <-stopRequested:
-		default:
-			loopFailed = true
-			requestStop()
-		}
-	}
-	select {
-	case <-serverDone:
-	default:
-		if loopErr == nil {
-			loopErr = errSystemTrayStopped
-			loopFailed = true
-		}
-		requestStop()
-	}
-	<-serverDone
-	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		if loopFailed {
-			<-shutdownDone
-		}
-		return serveErr
-	}
-	if loopFailed {
-		<-shutdownDone
-		return loopErr
-	}
-	select {
-	case <-stopRequested:
-		<-shutdownDone
-		return nil
-	default:
-		return serveErr
-	}
-}
-
-func runHeadless(_ func(), serverDone <-chan struct{}) error {
-	<-serverDone
-	return nil
-}
 
 func runSystemTray(requestStop func(), serverDone <-chan struct{}) (err error) {
 	log.SetOutput(io.Discard)
@@ -143,6 +42,15 @@ func runSystemTray(requestStop func(), serverDone <-chan struct{}) (err error) {
 		systray.SetTemplateIcon(trayTemplatePNG, regularIcon)
 		systray.SetTooltip("Codex Quota Router")
 		openItem := systray.AddMenuItem("打开管理页", managementURL)
+		autostartItem := systray.AddMenuItemCheckbox("开机自启动", "当前用户登录后自动启动", false)
+		if enabled, stateErr := autostartEnabled(); stateErr != nil {
+			autostartItem.Disable()
+		} else if enabled {
+			autostartItem.Check()
+		}
+		versionItem := systray.AddMenuItem("版本 "+applicationVersion, "Codex Quota Router 当前版本")
+		versionItem.Disable()
+		aboutItem := systray.AddMenuItem("关于（GitHub）", projectURL)
 		systray.AddSeparator()
 		quitItem := systray.AddMenuItem("退出", "停止 Codex Quota Router")
 		go func() {
@@ -150,6 +58,18 @@ func runSystemTray(requestStop func(), serverDone <-chan struct{}) (err error) {
 				select {
 				case <-openItem.ClickedCh:
 					openManagementPage()
+				case <-autostartItem.ClickedCh:
+					enabled := !autostartItem.Checked()
+					if setAutostartEnabled(enabled) != nil {
+						continue
+					}
+					if enabled {
+						autostartItem.Check()
+					} else {
+						autostartItem.Uncheck()
+					}
+				case <-aboutItem.ClickedCh:
+					openURL(projectURL)
 				case <-quitItem.ClickedCh:
 					requestStop()
 					return
@@ -172,17 +92,21 @@ func runSystemTray(requestStop func(), serverDone <-chan struct{}) (err error) {
 }
 
 func openManagementPage() {
+	openURL(managementURL)
+}
+
+func openURL(target string) {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", managementURL)
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
 	case "darwin":
-		command = exec.Command("open", managementURL)
+		command = exec.Command("open", target)
 	default:
 		if path, err := exec.LookPath("xdg-open"); err == nil {
-			command = exec.Command(path, managementURL)
+			command = exec.Command(path, target)
 		} else if path, err := exec.LookPath("gio"); err == nil {
-			command = exec.Command(path, "open", managementURL)
+			command = exec.Command(path, "open", target)
 		}
 	}
 	if command == nil {

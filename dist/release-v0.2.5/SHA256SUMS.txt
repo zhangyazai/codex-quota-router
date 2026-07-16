@@ -1,2 +1,0 @@
-5056e933bf648f658ced91387da7d5ac62931ab8f8364879a49f829e84375347  codex-quota-router-linux-amd64-v0.2.5.tar.gz
-ec517c04c771e3a2fea24c28612b128a8b6e93ec24a31709c23cc08dc6b5bf52  codex-quota-router-windows-amd64-v0.2.5.zip

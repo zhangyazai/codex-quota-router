@@ -5,1068 +5,345 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Codex Quota Router</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f3f6fa;
-      --surface: #ffffff;
-      --surface-soft: #f7f9fc;
-      --surface-strong: #edf3fa;
-      --text: #152033;
-      --muted: #536176;
-      --border: #d3ddea;
-      --border-strong: #aebdd0;
-      --accent: #0868c2;
-      --accent-hover: #0557a3;
-      --accent-soft: #e5f1ff;
-      --on-accent: #ffffff;
-      --success: #116b3b;
-      --success-soft: #e4f5eb;
-      --warning: #854707;
-      --warning-soft: #fff2d3;
-      --danger: #ad261d;
-      --danger-hover: #8e1d16;
-      --danger-soft: #ffefed;
-      --focus: #1774d1;
-      --scrim: rgba(10, 18, 31, 0.58);
-      --shadow: 0 12px 32px rgba(30, 48, 76, 0.08);
-      --radius: 16px;
-      --radius-small: 10px;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        color-scheme: dark;
-        --bg: #0a1120;
-        --surface: #111a2c;
-        --surface-soft: #172238;
-        --surface-strong: #1c2a43;
-        --text: #f1f5fb;
-        --muted: #afbbcd;
-        --border: #33435c;
-        --border-strong: #536782;
-        --accent: #78baff;
-        --accent-hover: #9bcdff;
-        --accent-soft: #173858;
-        --on-accent: #071423;
-        --success: #72d49b;
-        --success-soft: #173b2a;
-        --warning: #ffca70;
-        --warning-soft: #422e12;
-        --danger: #ff9c93;
-        --danger-hover: #ffc0ba;
-        --danger-soft: #4b211f;
-        --focus: #8bc6ff;
-        --scrim: rgba(0, 0, 0, 0.72);
-        --shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
-      }
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    html {
-      min-width: 320px;
-      background: var(--bg);
-    }
-
-    body {
-      min-height: 100dvh;
-      margin: 0;
-      overflow-x: hidden;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top right, color-mix(in srgb, var(--accent) 8%, transparent), transparent 34rem),
-        var(--bg);
-      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    button,
-    input,
-    select {
-      font: inherit;
-    }
-
-    button,
-    select,
-    input[type="text"],
-    input[type="url"],
-    input[type="number"],
-    input[type="password"] {
-      min-height: 44px;
-    }
-
-    button {
-      border: 1px solid transparent;
-      border-radius: var(--radius-small);
-      padding: 0.62rem 0.95rem;
-      cursor: pointer;
-      font-weight: 680;
-      touch-action: manipulation;
-      transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, opacity 180ms ease;
-    }
-
-    button:disabled {
-      cursor: not-allowed;
-      opacity: 0.48;
-    }
-
-    button:not(:disabled):active {
-      opacity: 0.76;
-    }
-
-    :focus-visible {
-      outline: 3px solid var(--focus);
-      outline-offset: 3px;
-    }
-
-    .skip-link {
-      position: fixed;
-      z-index: 100;
-      top: 0.75rem;
-      left: 0.75rem;
-      padding: 0.65rem 0.9rem;
-      border-radius: 8px;
-      color: #ffffff;
-      background: #172033;
-      transform: translateY(-160%);
-    }
-
-    .skip-link:focus {
-      transform: translateY(0);
-    }
-
-    .topbar {
-      border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-    }
-
-    .topbar-inner,
-    main,
-    footer {
-      width: min(1160px, calc(100% - 2rem));
-      margin-inline: auto;
-    }
-
-    .topbar-inner {
-      min-height: 68px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-    }
-
-    .brand {
-      min-width: 0;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .brand-mark {
-      width: 36px;
-      height: 36px;
-      display: grid;
-      flex: 0 0 auto;
-      place-items: center;
-      border-radius: 10px;
-      color: #ffffff;
-      background: #0868c2;
-      font-weight: 850;
-      letter-spacing: -0.06em;
-    }
-
-    .brand-name {
-      overflow: hidden;
-      font-weight: 780;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .service-state,
-    .tag,
-    .dirty-state {
-      min-height: 30px;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.42rem;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 0.2rem 0.65rem;
-      color: var(--muted);
-      background: var(--surface-soft);
-      font-size: 0.875rem;
-      font-weight: 680;
-      line-height: 1.3;
-    }
-
-    .service-state,
-    .tag {
-      white-space: nowrap;
-    }
-
-    .service-state::before,
-    .tag::before {
-      width: 8px;
-      height: 8px;
-      flex: 0 0 auto;
-      border-radius: 50%;
-      background: currentColor;
-      content: "";
-    }
-
-    .service-state[data-state="online"],
-    .tag.success {
-      color: var(--success);
-      border-color: color-mix(in srgb, var(--success) 35%, var(--border));
-      background: var(--success-soft);
-    }
-
-    .service-state[data-state="offline"],
-    .tag.danger {
-      color: var(--danger);
-      border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
-      background: var(--danger-soft);
-    }
-
-    .tag.warning,
-    .dirty-state {
-      color: var(--warning);
-      border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
-      background: var(--warning-soft);
-    }
-
-    main {
-      padding-block: 2.25rem 1rem;
-    }
-
-    h1,
-    h2,
-    h3,
-    p,
-    dl,
-    dd {
-      margin-top: 0;
-    }
-
-    h1 {
-      margin-bottom: 0.55rem;
-      font-size: clamp(1.75rem, 5vw, 2.65rem);
-      line-height: 1.15;
-      letter-spacing: -0.035em;
-    }
-
-    h2 {
-      margin-bottom: 0;
-      font-size: 1.22rem;
-      line-height: 1.3;
-    }
-
-    h3 {
-      margin-bottom: 0.15rem;
-      font-size: 1.05rem;
-      line-height: 1.35;
-    }
-
-    .intro {
-      max-width: 780px;
-      margin-bottom: 1.5rem;
-    }
-
-    .intro p,
-    .helper,
-    .muted {
-      color: var(--muted);
-    }
-
-    .intro p {
-      margin-bottom: 0;
-      font-size: 1.03rem;
-    }
-
-    .notice {
-      margin-bottom: 1rem;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-small);
-      padding: 0.8rem 0.95rem;
-      overflow-wrap: anywhere;
-    }
-
-    .notice.info {
-      color: var(--text);
-      border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
-      background: var(--accent-soft);
-    }
-
-    .notice.warning {
-      color: var(--warning);
-      border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
-      background: var(--warning-soft);
-    }
-
-    .notice.danger {
-      color: var(--danger);
-      border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
-      background: var(--danger-soft);
-    }
-
-    .notice[hidden],
-    [hidden] {
-      display: none !important;
-    }
-
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .summary-item {
-      min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-small);
-      padding: 0.9rem;
-      background: var(--surface);
-      box-shadow: var(--shadow);
-    }
-
-    .summary-item dt {
-      margin-bottom: 0.3rem;
-      color: var(--muted);
-      font-size: 0.82rem;
-      font-weight: 700;
-    }
-
-    .summary-item dd {
-      margin-bottom: 0;
-      overflow-wrap: anywhere;
-      font-size: 1.02rem;
-      font-weight: 760;
-    }
-
-    .panel {
-      margin-bottom: 1rem;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface);
-      box-shadow: var(--shadow);
-    }
-
-    .panel-head {
-      min-width: 0;
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      border-bottom: 1px solid var(--border);
-      padding: 1rem 1.1rem;
-    }
-
-    .panel-head p {
-      margin: 0.28rem 0 0;
-      color: var(--muted);
-    }
-
-    .panel-body {
-      padding: 1.1rem;
-    }
-
-    .toolbar,
-    .button-row,
-    .card-actions,
-    .form-actions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.55rem;
-    }
-
-    .toolbar {
-      justify-content: flex-end;
-    }
-
-    .primary {
-      color: var(--on-accent);
-      background: var(--accent);
-    }
-
-    .primary:not(:disabled):hover {
-      background: var(--accent-hover);
-    }
-
-    .secondary {
-      color: var(--text);
-      border-color: var(--border-strong);
-      background: var(--surface);
-    }
-
-    .secondary:not(:disabled):hover {
-      border-color: var(--accent);
-      background: var(--accent-soft);
-    }
-
-    .ghost {
-      color: var(--accent);
-      border-color: transparent;
-      background: transparent;
-    }
-
-    .ghost:not(:disabled):hover {
-      background: var(--accent-soft);
-    }
-
-    .danger-button {
-      color: var(--danger);
-      border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
-      background: var(--surface);
-    }
-
-    .danger-button:not(:disabled):hover {
-      color: var(--danger-hover);
-      background: var(--danger-soft);
-    }
-
-    .strategy-grid {
-      display: grid;
-      grid-template-columns: minmax(230px, 0.8fr) minmax(260px, 1.2fr);
-      align-items: start;
-      gap: 1rem;
-    }
-
-    .field {
-      min-width: 0;
-    }
-
-    .field + .field {
-      margin-top: 0.95rem;
-    }
-
-    .field label,
-    .field-label {
-      display: block;
-      margin-bottom: 0.38rem;
-      font-weight: 700;
-    }
-
-    input[type="text"],
-    input[type="url"],
-    input[type="number"],
-    input[type="password"],
-    select {
-      width: 100%;
-      min-width: 0;
-      border: 1px solid var(--border-strong);
-      border-radius: var(--radius-small);
-      padding: 0.6rem 0.72rem;
-      color: var(--text);
-      background: var(--surface);
-    }
-
-    input::placeholder {
-      color: color-mix(in srgb, var(--muted) 82%, transparent);
-    }
-
-    input[aria-invalid="true"],
-    select[aria-invalid="true"] {
-      border-color: var(--danger);
-      box-shadow: 0 0 0 1px var(--danger);
-    }
-
-    .helper {
-      margin: 0.35rem 0 0;
-      font-size: 0.88rem;
-      overflow-wrap: anywhere;
-    }
-
-    .field-error {
-      margin: 0.3rem 0 0;
-      color: var(--danger);
-      font-size: 0.88rem;
-      font-weight: 650;
-    }
-
-    .check-row {
-      min-height: 44px;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.58rem;
-      cursor: pointer;
-      font-weight: 650;
-      touch-action: manipulation;
-    }
-
-    .check-row input {
-      width: 20px;
-      height: 20px;
-      flex: 0 0 auto;
-      margin: 0;
-      accent-color: var(--accent);
-    }
-
-    .accounts-list {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      counter-reset: account;
-    }
-
-    .account-card {
-      min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface);
-      box-shadow: var(--shadow);
-      counter-increment: account;
-    }
-
-    .account-card + .account-card {
-      margin-top: 0.85rem;
-    }
-
-    .account-http-warning {
-      margin: 1rem 1rem 0;
-    }
-
-    .account-card-head {
-      min-width: 0;
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 0.85rem;
-      padding: 1rem;
-    }
-
-    .priority-number {
-      width: 38px;
-      height: 38px;
-      display: grid;
-      place-items: center;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--accent);
-      background: var(--accent-soft);
-      font-variant-numeric: tabular-nums;
-      font-weight: 800;
-    }
-
-    .account-heading {
-      min-width: 0;
-    }
-
-    .account-name {
-      margin: 0;
-      overflow-wrap: anywhere;
-      font-size: 1.08rem;
-    }
-
-    .account-subline {
-      min-width: 0;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.4rem 0.7rem;
-      margin-top: 0.3rem;
-      color: var(--muted);
-      font-size: 0.88rem;
-    }
-
-    .account-url {
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-
-    .account-models {
-      margin: 0.45rem 0 0;
-      color: var(--muted);
-      font-size: 0.88rem;
-      line-height: 1.55;
-      overflow-wrap: anywhere;
-    }
-
-    .account-models-label {
-      color: var(--text);
-      font-weight: 700;
-    }
-
-    .enabled-control {
-      justify-self: end;
-    }
-
-    .account-summary {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 0;
-      margin: 0;
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      background: var(--surface-soft);
-    }
-
-    .account-summary > div {
-      min-width: 0;
-      padding: 0.75rem 1rem;
-    }
-
-    .account-summary > div + div {
-      border-left: 1px solid var(--border);
-    }
-
-    .account-summary dt {
-      margin-bottom: 0.22rem;
-      color: var(--muted);
-      font-size: 0.78rem;
-      font-weight: 700;
-    }
-
-    .account-summary dd {
-      margin: 0;
-      overflow-wrap: anywhere;
-      font-size: 0.9rem;
-      font-variant-numeric: tabular-nums;
-      font-weight: 680;
-    }
-
-    .account-card-toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.6rem;
-      padding: 0.65rem 1rem;
-    }
-
-    .account-dialog {
-      width: min(720px, calc(100% - 2rem));
-      overflow: hidden;
-    }
-
-    .account-dialog .dialog-body {
-      max-height: calc(100dvh - 9rem);
-      overflow-y: auto;
-    }
-
-    .account-dialog .editor-grid {
-      margin-top: 1rem;
-    }
-
-    .editor-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
-    }
-
-    .editor-grid .field + .field {
-      margin-top: 0;
-    }
-
-    .full-width {
-      grid-column: 1 / -1;
-    }
-
-    .key-layout {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: end;
-      gap: 0.75rem;
-    }
-
-    .new-api-auth {
-      min-width: 0;
-      margin: 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-small);
-      padding: 0.9rem;
-      background: var(--surface-soft);
-    }
-
-    .new-api-auth legend {
-      padding-inline: 0.35rem;
-      font-weight: 760;
-    }
-
-    .new-api-auth-fields {
-      margin-top: 0.85rem;
-    }
-
-    .new-api-auth-note {
-      margin: 0.85rem 0 0;
-      border-left: 3px solid var(--border-strong);
-      padding-left: 0.75rem;
-      color: var(--muted);
-      font-size: 0.88rem;
-    }
-
-    .test-result {
-      min-height: 1.6rem;
-      margin: 0.75rem 0 0;
-      color: var(--muted);
-      overflow-wrap: anywhere;
-      font-size: 0.9rem;
-    }
-
-    .test-result.success {
-      color: var(--success);
-    }
-
-    .test-result.danger {
-      color: var(--danger);
-    }
-
-    [data-slot="models-result"]:empty {
-      display: none;
-    }
-
-    .empty-state {
-      border: 1px dashed var(--border-strong);
-      border-radius: var(--radius);
-      padding: 2rem 1rem;
-      text-align: center;
-      color: var(--muted);
-      background: var(--surface-soft);
-    }
-
-    .empty-state p {
-      margin-bottom: 0.8rem;
-    }
-
-    .save-bar {
-      position: sticky;
-      z-index: 10;
-      bottom: 0.75rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-top: 1rem;
-      border: 1px solid var(--border-strong);
-      border-radius: var(--radius);
-      padding: 0.75rem;
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-      box-shadow: 0 14px 38px rgba(21, 32, 51, 0.17);
-      backdrop-filter: blur(12px);
-    }
-
-    pre {
-      max-width: 100%;
-      margin: 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-small);
-      padding: 0.9rem;
-      color: var(--text);
-      background: var(--surface-soft);
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-      font: 0.88rem/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    }
-
-    code {
-      overflow-wrap: anywhere;
-      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    }
-
-    dialog {
-      width: min(520px, calc(100% - 2rem));
-      max-height: calc(100dvh - 2rem);
-      border: 1px solid var(--border-strong);
-      border-radius: var(--radius);
-      padding: 0;
-      color: var(--text);
-      background: var(--surface);
-      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
-    }
-
-    dialog::backdrop {
-      background: var(--scrim);
-    }
-
-    .dialog-body {
-      padding: 1.1rem;
-    }
-
-    .dialog-body h2 {
-      margin-bottom: 0.55rem;
-    }
-
-    .dialog-body ul {
-      max-height: 10rem;
-      margin: 0.75rem 0;
-      padding-left: 1.3rem;
-      overflow: auto;
-    }
-
-    .dialog-body li {
-      overflow-wrap: anywhere;
-    }
-
-    .dialog-actions {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-      gap: 0.6rem;
-      border-top: 1px solid var(--border);
-      padding: 0.85rem 1.1rem;
-    }
-
-    footer {
-      padding-block: 1rem 2.2rem;
-      color: var(--muted);
-      font-size: 0.88rem;
-      text-align: center;
-    }
-
-    .visually-hidden {
-      position: absolute !important;
-      width: 1px !important;
-      height: 1px !important;
-      padding: 0 !important;
-      margin: -1px !important;
-      overflow: hidden !important;
-      clip: rect(0, 0, 0, 0) !important;
-      white-space: nowrap !important;
-      border: 0 !important;
-    }
-
-    @media (max-width: 820px) {
-      .summary-grid,
-      .account-summary {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .account-summary > div:nth-child(3) {
-        border-left: 0;
-        border-top: 1px solid var(--border);
-      }
-
-      .account-summary > div:nth-child(4) {
-        border-top: 1px solid var(--border);
-      }
-
-      .strategy-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    @media (max-width: 620px) {
-      .topbar-inner,
-      main,
-      footer {
-        width: min(100% - 1rem, 1160px);
-      }
-
-      main {
-        padding-top: 1.4rem;
-      }
-
-      .brand-name {
-        max-width: 52vw;
-      }
-
-      .panel-head {
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      .toolbar {
-        justify-content: flex-start;
-      }
-
-      .account-card-head {
-        grid-template-columns: auto minmax(0, 1fr);
-      }
-
-      .enabled-control {
-        grid-column: 1 / -1;
-        justify-self: start;
-      }
-
-      .editor-grid,
-      .key-layout {
-        grid-template-columns: 1fr;
-      }
-
-      .save-bar {
-        position: static;
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      .save-bar .form-actions,
-      .save-bar button {
-        width: 100%;
-      }
-    }
-
-    @media (max-width: 390px) {
-      .summary-grid,
-      .account-summary {
-        grid-template-columns: 1fr;
-      }
-
-      .account-summary > div + div,
-      .account-summary > div:nth-child(3) {
-        border-top: 1px solid var(--border);
-        border-left: 0;
-      }
-
-      .account-card-toolbar {
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      .account-card-toolbar .button-row,
-      .account-card-toolbar button {
-        width: 100%;
-      }
-
-      .card-actions,
-      .card-actions button {
-        width: 100%;
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      *,
-      *::before,
-      *::after {
-        scroll-behavior: auto !important;
-        transition-duration: 0.01ms !important;
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="/assets/css/tokens.css">
+  <link rel="stylesheet" href="/assets/css/base.css">
+  <link rel="stylesheet" href="/assets/css/layout.css">
+  <link rel="stylesheet" href="/assets/css/components.css">
+  <link rel="stylesheet" href="/assets/css/features.css">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
 
-  <header class="topbar">
-    <div class="topbar-inner">
-      <div class="brand">
+  <dialog class="login-dialog" id="loginDialog" aria-labelledby="loginTitle">
+    <form id="loginForm">
+      <div class="dialog-body">
+        <h2 id="loginTitle">登录管理页面</h2>
+        <p>启用公网访问后，本机与公网管理入口都受管理员密码保护。</p>
+        <div class="field field-spaced">
+          <label for="loginPassword">管理员密码</label>
+          <input id="loginPassword" type="password" autocomplete="current-password" required>
+          <p class="field-error" id="loginError" role="alert" hidden></p>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="primary" id="loginButton" type="submit">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="app-shell" id="appShell">
+    <div class="top-gradient-blur" aria-hidden="true"></div>
+
+    <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="关闭导航" tabindex="-1"></button>
+
+    <aside class="sidebar" id="sidebar" aria-label="主要导航">
+      <div class="sidebar-brand">
         <div class="brand-mark" aria-hidden="true">CQ</div>
-        <div class="brand-name">Codex Quota Router</div>
-      </div>
-      <span class="service-state" id="serviceState" data-state="loading" role="status">正在连接</span>
-    </div>
-  </header>
-
-  <main id="main" tabindex="-1" aria-busy="true" inert>
-    <section class="intro" aria-labelledby="pageTitle">
-      <h1 id="pageTitle">多账号 Key 池</h1>
-      <p>集中管理多个上游账号，按优先级、轮询、最少使用、余额最多或余额最少规则自动路由 Codex 请求。</p>
-    </section>
-
-    <div class="notice danger" id="globalNotice" role="alert" tabindex="-1" hidden></div>
-    <div class="visually-hidden" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
-
-    <dl class="summary-grid" aria-label="路由状态摘要">
-      <div class="summary-item">
-        <dt>当前策略</dt>
-        <dd id="summaryStrategy">—</dd>
-      </div>
-      <div class="summary-item">
-        <dt>可参与路由账号</dt>
-        <dd id="summaryAccounts">—</dd>
-      </div>
-      <div class="summary-item">
-        <dt>最近路由</dt>
-        <dd id="summaryLastAccount">尚无请求</dd>
-      </div>
-      <div class="summary-item">
-        <dt>配置状态</dt>
-        <dd><span class="dirty-state" id="dirtyState" hidden>有未保存更改</span><span id="savedState">已同步</span></dd>
-      </div>
-    </dl>
-
-    <section class="panel" aria-labelledby="codexTitle" style="margin-top: 1.5rem;">
-      <div class="panel-head">
-        <div>
-          <h2 id="codexTitle">Codex 用户级配置</h2>
-          <p>复制后写入 Windows 的 <code>%USERPROFILE%\.codex\config.toml</code> 或 Linux 的 <code>~/.codex/config.toml</code>。</p>
-        </div>
-        <div class="toolbar">
-          <button class="secondary" id="rotateGatewayTokenButton" type="button">更换 Token</button>
-          <button class="secondary" id="copyCodexButton" type="button">复制配置</button>
+        <div class="brand-copy">
+          <span class="brand-name">Codex Quota Router</span>
+          <span class="brand-subtitle">OpenAI Codex 路由控制台<span id="appVersion"></span></span>
         </div>
       </div>
-      <div class="panel-body">
-        <p class="helper" style="margin-bottom: 0;">配置内容不会在页面显示。若文件已有其他设置，请合并内容，不要整份覆盖；更换 Token 后，旧 Token 会立即失效。</p>
-      </div>
-    </section>
 
-    <section class="panel" aria-labelledby="strategyTitle">
-      <div class="panel-head">
-        <div>
-          <h2 id="strategyTitle">路由规则</h2>
-          <p>规则应用于所有当前可参与路由的账号；该状态不代表模型请求已实时验证。</p>
-        </div>
+      <nav class="sidebar-nav" aria-label="功能视图">
+        <div class="nav-group-label">Workspace</div>
+        <a class="nav-item" href="#overview" data-view-target="overview" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="2"></rect>
+              <rect x="14" y="3" width="7" height="7" rx="2"></rect>
+              <rect x="3" y="14" width="7" height="7" rx="2"></rect>
+              <rect x="14" y="14" width="7" height="7" rx="2"></rect>
+            </svg>
+          </span>
+          <span class="nav-copy"><span class="nav-label">概览</span><span class="nav-meta">状态、策略与配置摘要</span></span>
+        </a>
+        <a class="nav-item" href="#accounts" data-view-target="accounts">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="9" cy="8" r="3"></circle>
+              <path d="M3.5 19c.7-3.1 2.6-4.7 5.5-4.7s4.8 1.6 5.5 4.7"></path>
+              <path d="M15 6.5a3 3 0 0 1 0 5.8"></path>
+              <path d="M16.5 14.8c2.1.6 3.4 2 4 4.2"></path>
+            </svg>
+          </span>
+          <span class="nav-copy"><span class="nav-label">账号</span><span class="nav-meta">账号池、额度与优先级</span></span>
+        </a>
+        <a class="nav-item" href="#routing" data-view-target="routing">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="5" cy="5" r="2"></circle>
+              <circle cx="19" cy="7" r="2"></circle>
+              <circle cx="19" cy="19" r="2"></circle>
+              <path d="M7 5h4a4 4 0 0 1 4 4v6a4 4 0 0 0 4 4"></path>
+              <path d="M15 9a4 4 0 0 1 4-4"></path>
+            </svg>
+          </span>
+          <span class="nav-copy"><span class="nav-label">路由</span><span class="nav-meta">分配策略与故障切换</span></span>
+        </a>
+        <a class="nav-item" href="#codex" data-view-target="codex">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8.5 4.5 3 10l5.5 5.5"></path>
+              <path d="m15.5 4.5 5.5 5.5-5.5 5.5"></path>
+              <path d="m14 2-4 20"></path>
+            </svg>
+          </span>
+          <span class="nav-copy"><span class="nav-label">Codex 配置</span><span class="nav-meta">网关 Token 与客户端配置</span></span>
+        </a>
+        <a class="nav-item" href="#security" data-view-target="security">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3 5 6v5c0 4.7 2.7 8.1 7 10 4.3-1.9 7-5.3 7-10V6l-7-3Z"></path>
+              <path d="m9 12 2 2 4-4"></path>
+            </svg>
+          </span>
+          <span class="nav-copy"><span class="nav-label">安全设置</span><span class="nav-meta">公网入口与管理员密码</span></span>
+        </a>
+      </nav>
+
+      <div class="sidebar-note">服务仅监听本机地址；公网入口必须经过配置的 HTTPS 反向代理。</div>
+    </aside>
+
+    <button class="sidebar-collapse-button" id="sidebarCollapseButton" type="button" aria-controls="sidebar" aria-label="收起侧栏" aria-expanded="true" title="收起侧栏">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m14 18-6-6 6-6"></path>
+      </svg>
+    </button>
+
+    <header class="app-header">
+      <div class="mobile-header-actions">
+        <button class="header-action" id="mobileMenuButton" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="打开导航">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16"></path>
+          </svg>
+        </button>
       </div>
-      <div class="panel-body">
-        <div class="strategy-grid">
-          <div>
-            <div class="field">
-              <label for="strategy">分配策略</label>
-              <select id="strategy" aria-describedby="strategyHelp strategyContinuityWarning">
-                <option value="priority">按优先级顺序</option>
-                <option value="round_robin">轮询使用</option>
-                <option value="least_used">最少使用优先</option>
-                <option value="highest_balance">余额最多优先</option>
-                <option value="lowest_balance">余额最少优先</option>
-              </select>
-              <p class="helper" id="strategyHelp"></p>
+
+      <div class="header-actions">
+        <span class="service-state" id="serviceState" data-state="loading" role="status">正在连接</span>
+        <div class="theme-switcher">
+          <button class="header-action" id="themeButton" type="button" aria-controls="themeMenu" aria-expanded="false" aria-label="切换主题" title="切换主题">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+            </svg>
+          </button>
+          <div class="theme-menu" id="themeMenu" role="group" aria-label="界面主题" hidden>
+            <button class="theme-choice" type="button" data-theme-choice="auto" aria-pressed="true">
+              <span>跟随系统</span><span class="theme-swatch" aria-hidden="true"></span>
+            </button>
+            <button class="theme-choice" type="button" data-theme-choice="light" aria-pressed="false">
+              <span>浅色</span><span class="theme-swatch" aria-hidden="true"></span>
+            </button>
+            <button class="theme-choice" type="button" data-theme-choice="dark" aria-pressed="false">
+              <span>深色</span><span class="theme-swatch" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+        <button class="header-action" id="logoutButton" type="button" aria-label="退出管理登录" title="退出管理登录" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <path d="m16 17 5-5-5-5M21 12H9"></path>
+          </svg>
+          <span class="visually-hidden">退出管理登录</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="content-shell">
+      <main id="main" tabindex="-1" aria-busy="true" inert>
+        <div class="notice danger" id="globalNotice" role="alert" tabindex="-1" hidden></div>
+        <div class="visually-hidden" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
+
+        <section class="view-page" data-view="overview" aria-labelledby="pageTitle">
+          <div class="hero">
+            <span class="hero-watermark" aria-hidden="true">CODEX</span>
+            <div class="hero-content intro">
+              <span class="hero-eyebrow">OpenAI Codex Router</span>
+              <h1 id="pageTitle">多账号 Key 池</h1>
+              <p>集中管理多个上游账号，按优先级、轮询、最少使用、余额最多或余额最少规则自动路由 Codex 请求。</p>
+            </div>
+            <div class="hero-meta">
+              <span class="hero-chip">本机路由控制台</span>
+              <span>配置、额度与安全状态集中管理</span>
             </div>
           </div>
-          <div>
-            <div class="notice info" id="effectiveStrategyNotice" role="status"></div>
-            <div class="notice warning" id="fallbackWarning" role="status" hidden></div>
-            <div class="notice warning" id="strategyContinuityWarning" role="note">
-              任何策略都可能在额度耗尽、认证失败或限流时故障切换账号；轮询、最少使用和余额策略还可能主动切换。使用 Responses API 的 <code>previous_response_id</code> 时，上下文 ID 通常不能跨不共享响应存储的账号或上游复用。
+
+          <dl class="summary-grid" aria-label="路由状态摘要">
+            <div class="summary-item">
+              <dt>当前策略</dt>
+              <dd id="summaryStrategy">—</dd>
+            </div>
+            <div class="summary-item">
+              <dt>可参与路由账号</dt>
+              <dd id="summaryAccounts">—</dd>
+            </div>
+            <div class="summary-item">
+              <dt>最近路由</dt>
+              <dd id="summaryLastAccount">尚无请求</dd>
+            </div>
+            <div class="summary-item">
+              <dt>配置状态</dt>
+              <dd><span class="dirty-state" id="dirtyState" hidden>有未保存更改</span><span id="savedState">已同步</span></dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="view-page" data-view="accounts" aria-labelledby="accountsTitle" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="accountsTitle">账号列表</h2>
+                <p>列表顺序就是优先级顺序；最上方账号优先级最高。</p>
+                <p class="helper">账面余额来自上游账单或额度接口，不代表模型请求当前可用。</p>
+                <p id="balanceRefreshResult">账面余额每 60 秒自动刷新（仅页面可见时）；未保存的编辑内容不会参与全局刷新。</p>
+              </div>
+              <div class="toolbar">
+                <button class="secondary" id="refreshBalancesButton" type="button">刷新已保存配置余额</button>
+                <button class="primary" id="addAccountButton" type="button">添加账号</button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
-    </section>
 
-    <section aria-labelledby="accountsTitle">
-      <div class="panel">
-        <div class="panel-head">
+          <ol class="accounts-list" id="accountList" aria-label="按优先级排序的账号"></ol>
+
+          <div class="empty-state" id="emptyState" hidden>
+            <p>还没有账号。添加第一个账号后即可配置路由。</p>
+            <button class="primary" id="emptyAddButton" type="button">添加账号</button>
+          </div>
+        </section>
+
+        <section class="view-page" data-view="routing" aria-labelledby="strategyTitle" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="strategyTitle">路由规则</h2>
+                <p>规则应用于所有当前可参与路由的账号；该状态不代表模型请求已实时验证。</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="strategy-grid">
+                <div>
+                  <div class="field">
+                    <label for="strategy">分配策略</label>
+                    <select id="strategy" aria-describedby="strategyHelp strategyContinuityWarning">
+                      <option value="priority">按优先级顺序</option>
+                      <option value="round_robin">轮询使用</option>
+                      <option value="least_used">最少使用优先</option>
+                      <option value="quota_reset">套餐重置优先</option>
+                      <option value="highest_balance">余额最多优先</option>
+                      <option value="lowest_balance">余额最少优先</option>
+                    </select>
+                    <p class="helper" id="strategyHelp"></p>
+                  </div>
+                </div>
+                <div>
+                  <div class="notice info" id="effectiveStrategyNotice" role="status"></div>
+                  <div class="notice warning notice-spaced" id="fallbackWarning" role="status" hidden></div>
+                  <div class="notice warning notice-spaced" id="strategyContinuityWarning" role="note">
+                    Responses 会话会优先粘在原账号；额度耗尽、认证失败或限流导致切号时，路由器会从内存回放完整上下文。状态不落盘，进程重启、空闲超过 24 小时、缓存淘汰、单条 transcript 超过 32 MiB，或请求引用账号绑定的 conversation、item/file ID 时，不能保证无感恢复。
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-page" data-view="codex" aria-labelledby="codexTitle" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="codexTitle">Codex 用户级配置</h2>
+                <p>复制后写入对应系统的用户级配置文件：</p>
+                <p>macOS：<code>~/.codex/config.toml</code></p>
+                <p>Windows：<code>%USERPROFILE%\.codex\config.toml</code></p>
+                <p>Linux：<code>~/.codex/config.toml</code></p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="token-create-row">
+                <div class="field">
+                  <label for="newGatewayTokenName">新 Token 名称</label>
+                  <input id="newGatewayTokenName" type="text" maxlength="100" placeholder="例如：开发团队、用户 001">
+                </div>
+                <button class="primary" id="addGatewayTokenButton" type="button">新增 Token</button>
+              </div>
+              <div class="field field-spaced">
+                <label for="gatewayTokenSearch">搜索 Token</label>
+                <input id="gatewayTokenSearch" type="text" maxlength="100" placeholder="按名称搜索">
+              </div>
+              <ul class="token-list" id="gatewayTokenList" aria-label="网关 Token 列表"></ul>
+              <div class="toolbar toolbar-spaced">
+                <span class="helper" id="gatewayTokenPageState"></span>
+                <button class="secondary" id="gatewayTokenPrevious" type="button">上一页</button>
+                <button class="secondary" id="gatewayTokenNext" type="button">下一页</button>
+              </div>
+              <p class="helper">Token 内容不会在列表中显示。复制配置会按需读取指定 Token；删除或轮换后，旧 Token 立即失效。</p>
+              <p class="helper">Codex OAuth 采用与 CLIProxyAPI 类似的 OpenAI 浏览器登录流程，由服务端完成 PKCE、回调和凭据保存，再把已授权账号接入 Codex Responses 上游；不会读取本机 <code>auth.json</code> 或浏览器 Cookie，也不会在页面回显 OAuth 凭据。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-page" data-view="security" aria-labelledby="securityTitle" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="securityTitle">公网访问与管理安全</h2>
+                <p>服务仍只监听 127.0.0.1；公网访问必须通过同机 HTTPS 反向代理，并保留原始 Host。</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="security-grid">
+                <div>
+                  <label class="check-row" for="allowPublicAccess">
+                    <input id="allowPublicAccess" type="checkbox">
+                    允许配置的公网 HTTPS Host 访问代理
+                  </label>
+                  <div class="field">
+                    <label for="publicBaseUrl">公网地址</label>
+                    <input id="publicBaseUrl" type="url" inputmode="url" placeholder="https://router.example.com" autocomplete="url">
+                    <p class="helper">只能填写 HTTPS Origin，不包含路径、查询参数或片段。</p>
+                  </div>
+                </div>
+                <div>
+                  <label class="check-row" for="allowPublicAdmin">
+                    <input id="allowPublicAdmin" type="checkbox">
+                    允许公网访问管理页面
+                  </label>
+                  <div class="field">
+                    <label for="adminPassword">设置或更换管理员密码</label>
+                    <input id="adminPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024">
+                    <p class="helper" id="adminPasswordState">至少 12 个字节；启用公网访问前必须设置，留空保留已保存密码。</p>
+                  </div>
+                  <label class="check-row" for="clearAdminPassword">
+                    <input id="clearAdminPassword" type="checkbox">
+                    清除已保存的管理员密码
+                  </label>
+                </div>
+              </div>
+              <div class="notice warning notice-spaced" role="note">
+                反向代理必须启用 TLS、限制 Host，并覆盖单值 X-Forwarded-For 与 X-Forwarded-Proto=https。启用公网访问后，本机管理也需要密码；不要把 4000 端口直接映射到公网。
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="save-bar" id="saveBar" aria-label="配置保存操作">
           <div>
-            <h2 id="accountsTitle">账号列表</h2>
-            <p>列表顺序就是优先级顺序；最上方账号优先级最高。</p>
-            <p class="helper">账面余额来自上游账单或额度接口，不代表模型请求当前可用。</p>
-            <p id="balanceRefreshResult">账面余额每 60 秒自动刷新（仅页面可见时）；未保存的编辑内容不会参与全局刷新。</p>
+            <strong>所有修改一次保存</strong>
+            <div class="helper">Key 留空会保留服务器中已保存的值。</div>
           </div>
-          <div class="toolbar">
-            <button class="secondary" id="refreshBalancesButton" type="button">刷新已保存配置余额</button>
-            <button class="primary" id="addAccountButton" type="button">添加账号</button>
+          <div class="form-actions">
+            <button class="secondary" id="reloadButton" type="button">放弃更改并重新加载</button>
+            <button class="primary" id="saveButton" type="button">保存全部配置</button>
           </div>
         </div>
-      </div>
+      </main>
 
-      <ol class="accounts-list" id="accountList" aria-label="按优先级排序的账号"></ol>
-
-      <div class="empty-state" id="emptyState" hidden>
-        <p>还没有账号。添加第一个账号后即可配置路由。</p>
-        <button class="primary" id="emptyAddButton" type="button">添加账号</button>
-      </div>
-    </section>
-
-    <div class="save-bar" aria-label="配置保存操作">
-      <div>
-        <strong>所有修改一次保存</strong>
-        <div class="helper">Key 留空会保留服务器中已保存的值。</div>
-      </div>
-      <div class="form-actions">
-        <button class="secondary" id="reloadButton" type="button">放弃更改并重新加载</button>
-        <button class="primary" id="saveButton" type="button">保存全部配置</button>
-      </div>
+      <footer>服务仅监听本机地址；公网访问必须经过配置的 HTTPS 反向代理。账号 Key 与余额认证秘密不会在页面中回显。</footer>
     </div>
-
-  </main>
-
-  <footer>管理页面仅监听本机地址；账号 Key 与余额认证秘密不会在页面中回显。</footer>
+  </div>
 
   <dialog id="httpRiskDialog" aria-labelledby="httpRiskTitle" aria-describedby="httpRiskDescription">
     <form method="dialog">
@@ -1106,26 +383,85 @@
 
       <dl class="account-summary">
         <div>
-          <dt>账面余额</dt>
-          <dd data-slot="balance">未知（尚未刷新）</dd>
+          <dt data-slot="balance-label">账面余额</dt>
+          <dd class="account-balance">
+            <strong class="account-balance-value" data-slot="balance">未知</strong>
+            <span class="account-balance-note" data-slot="balance-note">尚未刷新</span>
+            <span class="account-balance-subscription" data-slot="subscription-quota" hidden></span>
+          </dd>
         </div>
         <div>
-          <dt>已分配请求</dt>
-          <dd data-slot="requests">0</dd>
-        </div>
-        <div>
-          <dt>最近使用</dt>
-          <dd data-slot="last-used">尚未使用</dd>
-        </div>
-        <div>
-          <dt>近期连通性 / 冷却</dt>
-          <dd data-slot="health">待验证</dd>
+          <dt>请求统计</dt>
+          <dd class="request-summary">
+            <span class="request-metric">
+              <span class="request-metric-label">总请求</span>
+              <strong data-slot="requests">0</strong>
+            </span>
+            <span class="request-metric">
+              <span class="request-metric-label">成功</span>
+              <strong data-slot="successful-requests">0</strong>
+            </span>
+            <span class="request-metric">
+              <span class="request-metric-label">失败</span>
+              <strong data-slot="failed-requests">0</strong>
+            </span>
+            <span class="request-metric">
+              <span class="request-metric-label">健康度</span>
+              <strong data-slot="request-health">—</strong>
+            </span>
+          </dd>
         </div>
       </dl>
+
+      <section class="account-codex-details" data-account-auth="codex_oauth" aria-label="Codex OAuth 账号状态与用量" hidden>
+        <div class="oauth-meta-grid">
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">登录状态</span>
+            <span class="oauth-meta-value" data-slot="codex-login-state">未登录</span>
+          </div>
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">OpenAI 账号</span>
+            <span class="oauth-meta-value" data-slot="codex-email">—</span>
+          </div>
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">套餐</span>
+            <span class="oauth-meta-value" data-slot="codex-plan">未知</span>
+          </div>
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">访问凭据到期</span>
+            <span class="oauth-meta-value" data-slot="codex-expires">—</span>
+          </div>
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">下次额度重置</span>
+            <span class="oauth-meta-value" data-slot="codex-reset-at">尚无数据</span>
+          </div>
+          <div class="oauth-meta-item">
+            <span class="oauth-meta-label">最近用量检查</span>
+            <span class="oauth-meta-value" data-slot="codex-checked-at">尚未刷新</span>
+          </div>
+        </div>
+        <div class="oauth-usage-grid">
+          <div class="oauth-window" data-usage-window="primary">
+            <div class="oauth-window-head"><h4>套餐额度</h4><span data-slot="primary-percent">—</span></div>
+            <progress data-slot="primary-progress" max="100" value="0" aria-label="套餐额度已使用百分比"></progress>
+            <p class="helper" data-slot="primary-detail">暂无数据</p>
+          </div>
+          <div class="oauth-window" data-usage-window="secondary">
+            <div class="oauth-window-head"><h4>周额度</h4><span data-slot="secondary-percent">—</span></div>
+            <progress data-slot="secondary-progress" max="100" value="0" aria-label="周额度已使用百分比"></progress>
+            <p class="helper" data-slot="secondary-detail">暂无数据</p>
+          </div>
+        </div>
+        <p class="helper" data-slot="codex-credits">点数状态尚未获取。</p>
+        <div class="card-actions actions-spaced">
+          <button class="secondary" type="button" data-action="codex-usage">刷新用量</button>
+        </div>
+      </section>
 
       <div class="account-card-toolbar">
         <div class="button-row">
           <button class="secondary" type="button" data-action="edit">编辑账号</button>
+          <button class="ghost" type="button" data-action="clear-statistics">清空请求统计</button>
           <button class="ghost" type="button" data-action="move-up">上移</button>
           <button class="ghost" type="button" data-action="move-down">下移</button>
         </div>
@@ -1136,19 +472,41 @@
         <div class="dialog-body">
           <h2 data-slot="editor-title">编辑账号</h2>
           <p class="helper">修改会先保留在页面中，关闭弹窗后仍需点击“保存全部配置”才会写入服务器。</p>
-          <div class="editor-grid">
+          <div class="editor-grid field-spaced">
             <div class="field">
               <label data-label="name">账号名称</label>
               <input type="text" data-field="name" autocomplete="off" maxlength="100">
               <p class="field-error" data-error="name" hidden></p>
             </div>
             <div class="field">
+              <label data-label="authType">登录方式</label>
+              <select data-field="authType">
+                <option value="api_key">API Key</option>
+                <option value="codex_oauth">Codex OAuth（浏览器登录）</option>
+              </select>
+              <p class="helper" data-helper="authType">OAuth 会打开 OpenAI 官方登录页面，完成后由服务端安全保存凭据。</p>
+              <p class="field-error" data-error="authType" role="alert" hidden></p>
+            </div>
+            <div class="field full-width">
+              <label data-label="provider">上游平台</label>
+              <select data-field="provider">
+                <option value="" disabled>请选择平台</option>
+                <option value="auto" data-provider-option="legacy-auto" disabled hidden>待选择平台（旧配置）</option>
+                <option value="new_api">New API</option>
+                <option value="sub2api">Sub2API</option>
+                <option value="openai_responses">OpenAI Responses 兼容上游</option>
+                <option value="codex_oauth" data-provider-option="codex-oauth" disabled hidden>Codex 官方 OAuth（codex_oauth）</option>
+              </select>
+              <p class="helper" data-helper="provider">请选择实际平台；不会根据域名猜测。修改已保存账号的平台后，原有活跃会话将不能继续。</p>
+              <p class="field-error" data-error="provider" role="alert" hidden></p>
+            </div>
+            <div class="field full-width" data-account-auth="api_key">
               <label data-label="baseUrl">上游 Base URL</label>
               <input type="url" data-field="baseUrl" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://example.com/v1">
               <p class="helper" data-helper="baseUrl">必须是完整的 <code>http://</code> 或 <code>https://</code> 地址。</p>
               <p class="field-error" data-error="baseUrl" hidden></p>
             </div>
-            <div class="field full-width">
+            <div class="field full-width" data-account-auth="api_key">
               <div class="key-layout">
                 <div>
                   <label data-label="apiKey">API Key</label>
@@ -1162,8 +520,8 @@
                 </label>
               </div>
             </div>
-            <fieldset class="new-api-auth full-width">
-              <legend>New API 实际余额认证（可选）</legend>
+            <fieldset class="new-api-auth full-width" data-account-auth="api_key" data-new-api-settings data-slot="new-api-auth-settings">
+              <legend>套餐余额读取方式</legend>
               <div class="field">
                 <label data-label="newApiAuthMode">认证方式</label>
                 <select data-field="newApiAuthMode">
@@ -1171,12 +529,12 @@
                   <option value="password">用户名 + 密码</option>
                   <option value="access_token">用户 Access Token + 用户 ID</option>
                 </select>
-                <p class="helper" data-helper="newApiAuthMode">用于核对 New API 用户账号余额；不影响上方 API Key 代理请求。</p>
+                <p class="helper" data-helper="newApiAuthMode">登录账户后自动读取钱包、订阅余额、计费偏好和重置时间；不登录则在下方手工填写重置规则。此选择不影响上方 API Key 代理请求。</p>
                 <p class="field-error" data-error="newApiAuthMode" role="alert" hidden></p>
               </div>
 
               <div class="new-api-auth-fields" data-auth-panel="api_key">
-                <p class="helper">使用上方 API Key 查询 Token 额度并尝试兼容账单接口；若 New API 只返回 Token 额度，就不能证明用户账号还有多少余额。此时 Token 标记为无限会显示“Token 无限（账号余额未验证）”。保存为此方式会自动清除已保存的用户名、用户 ID 和余额认证秘密。</p>
+                <p class="helper">此方式不会登录 New API 账户，只能查询 API Key 自身额度并尝试兼容账单接口，无法核对账户及订阅余额。显示值可能不准确，余额策略可能无法按预期生效。保存为此方式会自动清除已保存的用户名、用户 ID 和余额认证秘密。</p>
               </div>
 
               <div class="new-api-auth-fields" data-auth-panel="password" hidden>
@@ -1210,13 +568,94 @@
               </label>
               <p class="new-api-auth-note">Passkey 受 WebAuthn RP Origin 绑定限制，本机管理页不能冒充上游站点发起认证。请先在上游使用 Passkey 登录，再生成用户 Access Token，并在这里选择“用户 Access Token + 用户 ID”。</p>
             </fieldset>
+            <fieldset class="new-api-auth full-width" data-account-auth="api_key" data-new-api-settings data-slot="quota-reset-settings">
+              <legend>套餐重置规则</legend>
+              <p class="helper">登录 New API 账户时由服务端自动读取；选择“不登录用户账号”时，才使用这里的手工规则。</p>
+              <div data-slot="quota-reset-manual">
+                <div class="quota-reset-grid new-api-auth-fields">
+                  <div class="field">
+                    <label data-label="quotaResetPeriod">重置规则</label>
+                    <select data-field="quotaResetPeriod">
+                      <option value="never">不设置</option>
+                      <option value="daily">每天 00:00</option>
+                      <option value="weekly">每周一 00:00</option>
+                      <option value="monthly">每月 1 日 00:00</option>
+                      <option value="custom">自定义固定间隔</option>
+                    </select>
+                    <p class="field-error" data-error="quotaResetPeriod" role="alert" hidden></p>
+                  </div>
+                  <div class="field" data-slot="quota-reset-timezone" hidden>
+                    <label data-label="quotaResetTimezone">服务时区</label>
+                    <input type="text" data-field="quotaResetTimezone" autocomplete="off" spellcheck="false" placeholder="Asia/Shanghai">
+                    <p class="helper" data-helper="quotaResetTimezone">填写 IANA 时区，例如 Asia/Shanghai。</p>
+                    <p class="field-error" data-error="quotaResetTimezone" role="alert" hidden></p>
+                  </div>
+                </div>
+                <p class="new-api-auth-note" data-slot="quota-reset-rule"></p>
+                <div class="quota-reset-grid new-api-auth-fields" data-slot="quota-reset-custom" hidden>
+                  <div class="field">
+                    <label data-label="quotaResetEvery">每隔</label>
+                    <input type="number" data-field="quotaResetEvery" inputmode="numeric" min="1" max="100000" step="1">
+                    <p class="helper" data-helper="quotaResetEvery">填写正整数。</p>
+                    <p class="field-error" data-error="quotaResetEvery" role="alert" hidden></p>
+                  </div>
+                  <div class="field">
+                    <label data-label="quotaResetUnit">周期单位</label>
+                    <select data-field="quotaResetUnit">
+                      <option value="hour">小时</option>
+                      <option value="day">天</option>
+                      <option value="week">周</option>
+                      <option value="month">月</option>
+                    </select>
+                    <p class="field-error" data-error="quotaResetUnit" role="alert" hidden></p>
+                  </div>
+                  <div class="field">
+                    <label data-label="quotaResetAnchorAt">重置基准时间</label>
+                    <input type="datetime-local" data-field="quotaResetAnchorAt" step="60">
+                    <p class="helper" data-helper="quotaResetAnchorAt">填写最近一次或下一次重置时间；按浏览器本地时区输入，保存时转换为 RFC3339。</p>
+                    <p class="field-error" data-error="quotaResetAnchorAt" role="alert" hidden></p>
+                  </div>
+                </div>
+              </div>
+              <div data-slot="quota-reset-auto" hidden>
+                <p class="helper new-api-auth-fields">当前使用账户登录认证，服务端会自动读取 New API 订阅信息，不使用手工重置规则。</p>
+              </div>
+              <p class="new-api-auth-note" data-slot="quota-reset-next" role="status" aria-live="polite">未设置套餐重置规则。</p>
+            </fieldset>
+            <section class="oauth-panel full-width" data-account-auth="codex_oauth" data-slot="codex-oauth-panel" aria-label="Codex OAuth 登录管理" hidden>
+              <div class="oauth-panel-head">
+                <h3>Codex OAuth</h3>
+              </div>
+              <p class="helper">通过 OpenAI 官方浏览器 OAuth 登录，不需要填写 API Key。点击登录会先自动保存账号配置并生成授权链接；服务端只保存刷新请求所需的 OAuth 凭据，账号状态和用量显示在账号卡片中。</p>
+              <p class="helper" data-slot="codex-save-hint"></p>
+              <label class="check-row">
+                <input type="checkbox" data-field="disableCodexCredits">
+                <span>套餐额度耗尽后停止路由（禁止使用额外点数）</span>
+              </label>
+              <p class="helper" data-helper="disableCodexCredits">开启后会在路由前刷新缓存用量；任一套餐窗口达到 100% 时停止使用该账号。用量未知、过期或刷新失败时也会暂时停止路由，避免误用额外点数。</p>
+              <div class="device-auth-box" data-slot="codex-oauth-box" hidden>
+                <strong>完成 OpenAI 浏览器登录</strong>
+                <p class="helper">打开或复制下方授权链接，在 OpenAI 官方页面完成登录。本页会持续检查服务端回调并自动显示结果。</p>
+                <div class="card-actions actions-spaced">
+                  <a data-slot="codex-authorization-link" target="_blank" rel="noopener noreferrer">打开 OpenAI 登录页面 ↗</a>
+                  <button class="secondary" type="button" data-action="codex-copy-link">复制授权链接</button>
+                </div>
+                <p class="helper" data-slot="codex-oauth-expiry"></p>
+                <p class="helper" data-slot="codex-oauth-status" role="status" aria-live="polite"></p>
+              </div>
+              <div class="card-actions actions-spaced">
+                <button class="primary" type="button" data-action="codex-login">登录 OpenAI</button>
+                <button class="danger-button" type="button" data-action="codex-logout" hidden>退出账号</button>
+              </div>
+              <p class="test-result" data-slot="codex-auth-result" role="status" aria-live="polite"></p>
+            </section>
           </div>
 
-          <div class="card-actions" style="margin-top: 1rem;">
-            <button class="primary" type="button" data-action="test-balance">查询当前填写余额</button>
-            <button class="secondary" type="button" data-action="models">刷新支持模型</button>
-            <button class="secondary" type="button" data-action="resume" hidden>立即恢复账号</button>
-            <button class="secondary" type="button" data-action="reset">验证并恢复账号</button>
+          <div class="card-actions actions-spaced">
+            <button class="primary" type="button" data-action="test-balance" data-api-action>查询当前填写余额</button>
+            <button class="secondary" type="button" data-action="models" data-api-action>刷新支持模型</button>
+            <button class="secondary" type="button" data-action="resume" hidden>立即唤醒验证</button>
+            <button class="secondary" type="button" data-action="reset" data-api-action>唤醒并等待验证</button>
             <button class="danger-button" type="button" data-action="delete">删除账号</button>
           </div>
           <p class="test-result" data-slot="models-result" role="status"></p>
@@ -1229,2258 +668,6 @@
     </li>
   </template>
 
-  <script>
-    (function () {
-      "use strict";
-
-      var strategyLabels = {
-        priority: "按优先级顺序",
-        round_robin: "轮询使用",
-        least_used: "最少使用优先",
-        highest_balance: "余额最多优先",
-        lowest_balance: "余额最少优先"
-      };
-
-      var strategyDescriptions = {
-        priority: "从列表顶部开始选择第一个可参与路由的账号；请求明确失败或进入冷却后继续向后尝试。",
-        round_robin: "在可参与路由的账号之间依次轮换，让请求数量更均匀。",
-        least_used: "从当前可参与路由的账号中选择本次服务启动以来已分配请求数最少的账号，连续分配 30 次后重新比较；批次内账号一旦不可用会立即切换。服务重启后计数重新开始。",
-        highest_balance: "只有全部路由候选的实际余额都已验证、新鲜、可读取且单位可比较时才按余额选择；瞬时网络、限流或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告。认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。",
-        lowest_balance: "只有全部路由候选的实际余额都已验证、新鲜、可读取且单位可比较时，才优先选择有限余额最低的账号；无限额度排在有限额度之后，余额相同按列表顺序。瞬时网络、限流或超时失败会在最近成功值仍处于 5 分钟有效期时继续使用并显示警告；认证失败、只有 Token 额度、余额未知或过期、没有成功值、单位不同，都会整体回退到最少使用优先。"
-      };
-
-      var stateLabels = {
-        available: "可参与路由",
-        recent_success: "近期成功",
-        recent_failure: "最近失败",
-        ready: "可参与路由",
-        active: "正在使用",
-        cooldown: "冷却中",
-        cooling_down: "冷却中",
-        temporarily_disabled: "暂时停用",
-        incomplete: "配置不完整",
-        blocked: "已阻止",
-        pending_changes: "待保存",
-        exhausted: "额度耗尽",
-        quota_exhausted: "额度耗尽",
-        unavailable: "暂不可用",
-        invalid: "Key 无效",
-        disabled: "已停用",
-        unverified: "待验证",
-        unknown: "状态未知"
-      };
-
-      var balanceStateLabels = {
-        unknown: "未知（不按 0 计算）",
-        unsupported: "上游不提供余额",
-        unavailable: "余额获取失败",
-        error: "余额获取失败",
-        auth_error: "账号余额认证失败（请检查认证信息）",
-        not_checked: "未知（尚未刷新）",
-        pending: "正在刷新"
-      };
-
-      var balanceErrorStageLabels = {
-        token_usage: "Token 额度接口",
-        token_quota: "Token 额度接口",
-        account_login: "用户登录",
-        account_auth: "用户认证",
-        account_quota: "用户余额接口",
-        quota_metadata: "站点额度设置",
-        status: "站点额度设置",
-        dashboard_subscription: "兼容账单订阅接口",
-        dashboard_usage: "兼容账单用量接口",
-        conversion: "额度换算",
-        status_conversion: "额度换算",
-        dashboard: "兼容账单接口",
-        account: "账号余额",
-        network: "网络请求",
-        timeout: "余额查询"
-      };
-
-      var balanceErrorCodeLabels = {
-        auth_failed: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
-        unauthorized: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
-        invalid_credentials: "认证失败，请检查用户名、密码、Access Token 与用户 ID",
-        api_key_unauthorized: "API Key 无效或无权读取 Token 额度",
-        account_unauthorized: "用户认证失败，请检查用户名、密码、Access Token 与用户 ID",
-        access_token_unauthorized: "用户 Access Token 无效或已失效",
-        user_id_required: "上游要求提供 New API 用户 ID",
-        user_id_mismatch: "New API 用户 ID 与 Access Token 不匹配",
-        two_factor_required: "账号要求两步验证，请改用用户 Access Token",
-        timeout: "查询超时",
-        deadline_exceeded: "查询超时",
-        network_error: "网络连接失败",
-        rate_limited: "上游限流",
-        upstream_unavailable: "上游暂不可用",
-        upstream_rejected: "上游拒绝余额查询",
-        upstream_error: "上游接口返回错误",
-        invalid_response: "上游响应格式无效",
-        missing_quota: "上游响应缺少余额字段",
-        canceled: "查询已取消",
-        unsupported: "上游不支持此余额查询"
-      };
-
-      var newAPIAuthModes = {
-        api_key: true,
-        password: true,
-        access_token: true
-      };
-
-      var fallbackReasonLabels = {
-        balance_stale: "部分路由候选的余额数据已过期",
-        balance_unavailable: "部分路由候选的余额未知或不可用",
-        balance_account_unverified: "部分路由候选只有 Token 额度，尚未验证账号余额",
-        balance_unit_unknown: "部分余额缺少可比较的单位",
-        balance_unit_mismatch: "账号余额单位不同，无法直接比较"
-      };
-
-      var csrfToken = "";
-      var config = createEmptyConfig();
-      var status = createEmptyStatus();
-      var codexSnippet = "";
-      var dirty = false;
-      var pollTimer = 0;
-      var balancePollTimer = 0;
-      var balanceRefreshPromise = null;
-      var balanceRetryAttempt = 0;
-      var balanceRetryAccountIds = [];
-      var balanceRetryDelays = [5000, 20000];
-      var statusRefreshPromise = null;
-      var balancePollInterval = 60000;
-      var pageReady = false;
-      var pageBusy = true;
-
-      var elements = {
-        main: document.getElementById("main"),
-        serviceState: document.getElementById("serviceState"),
-        globalNotice: document.getElementById("globalNotice"),
-        liveRegion: document.getElementById("liveRegion"),
-        summaryStrategy: document.getElementById("summaryStrategy"),
-        summaryAccounts: document.getElementById("summaryAccounts"),
-        summaryLastAccount: document.getElementById("summaryLastAccount"),
-        dirtyState: document.getElementById("dirtyState"),
-        savedState: document.getElementById("savedState"),
-        strategy: document.getElementById("strategy"),
-        strategyHelp: document.getElementById("strategyHelp"),
-        effectiveStrategyNotice: document.getElementById("effectiveStrategyNotice"),
-        fallbackWarning: document.getElementById("fallbackWarning"),
-        strategyContinuityWarning: document.getElementById("strategyContinuityWarning"),
-        accountList: document.getElementById("accountList"),
-        emptyState: document.getElementById("emptyState"),
-        accountTemplate: document.getElementById("accountTemplate"),
-        addAccountButton: document.getElementById("addAccountButton"),
-        emptyAddButton: document.getElementById("emptyAddButton"),
-        refreshBalancesButton: document.getElementById("refreshBalancesButton"),
-        balanceRefreshResult: document.getElementById("balanceRefreshResult"),
-        reloadButton: document.getElementById("reloadButton"),
-        saveButton: document.getElementById("saveButton"),
-        rotateGatewayTokenButton: document.getElementById("rotateGatewayTokenButton"),
-        copyCodexButton: document.getElementById("copyCodexButton"),
-        httpRiskDialog: document.getElementById("httpRiskDialog"),
-        httpRiskList: document.getElementById("httpRiskList")
-      };
-
-      function createEmptyConfig() {
-        return {
-          strategy: "priority",
-          allowInsecureHttp: false,
-          accounts: []
-        };
-      }
-
-      function createEmptyStatus() {
-        return {
-          strategy: "priority",
-          effectiveStrategy: "priority",
-          fallbackReason: "",
-          lastRoutedAccountId: "",
-          lastRoutedAccountName: "",
-          availableAccounts: 0,
-          totalAccounts: 0,
-          accounts: []
-        };
-      }
-
-      function normalizeConfig(value) {
-        var source = value && typeof value === "object" ? value : {};
-        var accounts = Array.isArray(source.accounts) ? source.accounts : [];
-        return {
-          strategy: strategyLabels[source.strategy] ? source.strategy : "priority",
-          allowInsecureHttp: source.allowInsecureHttp === true,
-          accounts: accounts.map(function (account) {
-            var id = account.id == null ? "" : String(account.id);
-            var newApiAuthMode = newAPIAuthModes[account.newApiAuthMode] ? account.newApiAuthMode : "api_key";
-            var newApiUserId = typeof account.newApiUserId === "number" && Number.isSafeInteger(account.newApiUserId)
-              ? account.newApiUserId
-              : 0;
-            var normalizedAccount = {
-              id: id,
-              _uiId: id || newAccountId(),
-              name: typeof account.name === "string" ? account.name : "",
-              baseUrl: typeof account.baseUrl === "string" ? account.baseUrl : "",
-              enabled: account.enabled !== false,
-              _savedBaseUrl: typeof account.baseUrl === "string" ? account.baseUrl.trim() : "",
-              _savedEnabled: account.enabled !== false,
-              keyConfigured: account.keyConfigured === true,
-              apiKey: "",
-              clearApiKey: false,
-              newApiAuthMode: newApiAuthMode,
-              _savedNewApiAuthMode: newApiAuthMode,
-              newApiUsername: typeof account.newApiUsername === "string" ? account.newApiUsername : "",
-              _savedNewApiUsername: typeof account.newApiUsername === "string" ? account.newApiUsername.trim() : "",
-              newApiUserId: newApiUserId,
-              _savedNewApiUserId: newApiUserId,
-              newApiSecretConfigured: account.newApiSecretConfigured === true,
-              newApiSecret: "",
-              clearNewApiSecret: false,
-              _models: [],
-              _modelsState: "idle",
-              _modelsError: "",
-              _modelsRequestId: 0
-            };
-            normalizedAccount._modelsState = savedAccountModelsReady(normalizedAccount) ? "idle" : "incomplete";
-            return normalizedAccount;
-          })
-        };
-      }
-
-      function normalizeStatus(value) {
-        var source = value && typeof value === "object" ? value : {};
-        return {
-          strategy: strategyLabels[source.strategy] ? source.strategy : "priority",
-          effectiveStrategy: strategyLabels[source.effectiveStrategy] ? source.effectiveStrategy : (strategyLabels[source.strategy] ? source.strategy : "priority"),
-          fallbackReason: typeof source.fallbackReason === "string" ? source.fallbackReason : "",
-          lastRoutedAccountId: source.lastRoutedAccountId == null ? "" : String(source.lastRoutedAccountId),
-          lastRoutedAccountName: typeof source.lastRoutedAccountName === "string" ? source.lastRoutedAccountName : "",
-          availableAccounts: numberOrZero(source.availableAccounts),
-          totalAccounts: numberOrZero(source.totalAccounts),
-          accounts: Array.isArray(source.accounts) ? source.accounts : []
-        };
-      }
-
-      function numberOrZero(value) {
-        return typeof value === "number" && Number.isFinite(value) ? value : 0;
-      }
-
-      function newAccountId() {
-        if (window.crypto && typeof window.crypto.randomUUID === "function") {
-          return window.crypto.randomUUID();
-        }
-        if (window.crypto && typeof window.crypto.getRandomValues === "function") {
-          var bytes = new Uint32Array(4);
-          window.crypto.getRandomValues(bytes);
-          return "account-" + Array.prototype.map.call(bytes, function (item) {
-            return item.toString(16).padStart(8, "0");
-          }).join("");
-        }
-        return "account-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-      }
-
-      function announce(message) {
-        elements.liveRegion.textContent = "";
-        window.setTimeout(function () {
-          elements.liveRegion.textContent = message;
-        }, 20);
-      }
-
-      function setTextIfChanged(element, text) {
-        var next = text == null ? "" : String(text);
-        if (element.textContent !== next) {
-          element.textContent = next;
-        }
-      }
-
-      function setHiddenIfChanged(element, hidden) {
-        if (element.hidden !== hidden) {
-          element.hidden = hidden;
-        }
-      }
-
-      function showGlobalError(message) {
-        elements.globalNotice.textContent = message;
-        elements.globalNotice.hidden = false;
-        elements.globalNotice.focus();
-      }
-
-      function clearGlobalError() {
-        elements.globalNotice.hidden = true;
-        elements.globalNotice.textContent = "";
-      }
-
-      function setServiceState(kind, text) {
-        if (elements.serviceState.dataset.state !== kind) {
-          elements.serviceState.dataset.state = kind;
-        }
-        setTextIfChanged(elements.serviceState, text);
-      }
-
-      function restorePageControl(control) {
-        if (!control || !control.hasAttribute("data-page-lock-disabled")) {
-          return;
-        }
-        control.disabled = control.dataset.pageLockDisabled === "true";
-        control.removeAttribute("data-page-lock-disabled");
-      }
-
-      function updatePageInteractivity() {
-        var locked = pageBusy || !pageReady;
-        elements.main.setAttribute("aria-busy", String(pageBusy));
-        if (pageBusy) {
-          elements.main.setAttribute("inert", "");
-        } else {
-          elements.main.removeAttribute("inert");
-        }
-
-        elements.main.querySelectorAll("button, input, select").forEach(function (control) {
-          if (locked) {
-            if (!control.hasAttribute("data-page-lock-disabled")) {
-              control.dataset.pageLockDisabled = String(control.disabled);
-            }
-            control.disabled = true;
-          } else {
-            restorePageControl(control);
-          }
-        });
-
-        if (!pageBusy && !pageReady) {
-          restorePageControl(elements.reloadButton);
-          elements.reloadButton.disabled = false;
-        }
-      }
-
-      function setPageBusy(busy) {
-        pageBusy = busy;
-        updatePageInteractivity();
-        if (!busy) {
-          elements.copyCodexButton.disabled = !pageReady || !codexSnippet;
-        }
-      }
-
-      function markDirty() {
-        if (!dirty) {
-          dirty = true;
-          elements.dirtyState.hidden = false;
-          elements.savedState.hidden = true;
-          document.title = "• Codex Quota Router";
-        }
-      }
-
-      function markClean() {
-        dirty = false;
-        elements.dirtyState.hidden = true;
-        elements.savedState.hidden = false;
-        document.title = "Codex Quota Router";
-      }
-
-      function getStatusAccount(id) {
-        if (!id) {
-          return null;
-        }
-        var target = String(id);
-        for (var index = 0; index < status.accounts.length; index += 1) {
-          if (String(status.accounts[index].id) === target) {
-            return status.accounts[index];
-          }
-        }
-        return null;
-      }
-
-      function accountUIID(account) {
-        return String(account._uiId || account.id);
-      }
-
-      function getAccount(id) {
-        var target = String(id);
-        for (var index = 0; index < config.accounts.length; index += 1) {
-          if (accountUIID(config.accounts[index]) === target) {
-            return config.accounts[index];
-          }
-        }
-        return null;
-      }
-
-      function getAccountIndex(id) {
-        var target = String(id);
-        for (var index = 0; index < config.accounts.length; index += 1) {
-          if (accountUIID(config.accounts[index]) === target) {
-            return index;
-          }
-        }
-        return -1;
-      }
-
-      function findCard(id) {
-        var cards = elements.accountList.querySelectorAll(".account-card");
-        for (var index = 0; index < cards.length; index += 1) {
-          if (cards[index].dataset.accountId === String(id)) {
-            return cards[index];
-          }
-        }
-        return null;
-      }
-
-      function fieldDomId(field, index) {
-        return "account-" + (index + 1) + "-" + field;
-      }
-
-      function setFieldIdentity(card, index, field) {
-        var input = card.querySelector('[data-field="' + field + '"]');
-        var label = card.querySelector('[data-label="' + field + '"]');
-        var helper = card.querySelector('[data-helper="' + field + '"]');
-        var error = card.querySelector('[data-error="' + field + '"]');
-        var id = fieldDomId(field, index);
-        if (input) {
-          input.id = id;
-        }
-        if (label) {
-          label.htmlFor = id;
-        }
-        var describedBy = [];
-        if (helper) {
-          helper.id = id + "-help";
-          describedBy.push(helper.id);
-        }
-        if (error) {
-          error.id = id + "-error";
-          describedBy.push(error.id);
-        }
-        if (input && describedBy.length) {
-          input.setAttribute("aria-describedby", describedBy.join(" "));
-        }
-      }
-
-      function updateAccountControlLabels(card, account, index) {
-        var name = account.name.trim() || "未命名账号";
-        var enabled = card.querySelector('[data-field="enabled"]');
-        var clearKey = card.querySelector('[data-field="clearApiKey"]');
-        var clearNewAPISecret = card.querySelector('[data-field="clearNewApiSecret"]');
-        var labels = {
-          edit: "编辑账号 " + name,
-          "move-up": "上移账号 " + name + "，当前第 " + (index + 1) + " 位",
-          "move-down": "下移账号 " + name + "，当前第 " + (index + 1) + " 位",
-          "test-balance": "查询账号 " + name + " 当前填写内容的余额",
-          models: "刷新账号 " + name + " 当前填写内容支持的模型",
-          resume: "立即恢复账号 " + name + " 的路由资格",
-          reset: "验证账号 " + name + "，成功后清除阻止或冷却状态",
-          delete: "删除账号 " + name,
-          "close-editor": (account.id ? "完成编辑账号 " : "完成添加账号 ") + name
-        };
-        enabled.setAttribute("aria-label", "启用账号 " + name);
-        clearKey.setAttribute("aria-label", "清除账号 " + name + " 已保存的 API Key");
-        clearNewAPISecret.setAttribute("aria-label", "清除账号 " + name + " 已保存的 New API 余额认证秘密");
-        Object.keys(labels).forEach(function (action) {
-          var button = card.querySelector('[data-action="' + action + '"]');
-          if (button) {
-            button.setAttribute("aria-label", labels[action]);
-          }
-        });
-      }
-
-      function newAPIAuthIdentifierChanged(account) {
-        if (account.newApiAuthMode !== account._savedNewApiAuthMode) {
-          return true;
-        }
-        if (account.newApiAuthMode === "password") {
-          return account.newApiUsername.trim() !== account._savedNewApiUsername;
-        }
-        if (account.newApiAuthMode === "access_token") {
-          return account.newApiUserId !== account._savedNewApiUserId;
-        }
-        return false;
-      }
-
-      function updateNewAPIAuthFields(card, account) {
-        var mode = newAPIAuthModes[account.newApiAuthMode] ? account.newApiAuthMode : "api_key";
-        var mustReplaceSecret = mode !== "api_key" && newAPIAuthIdentifierChanged(account);
-        var secretGroup = card.querySelector("[data-auth-secret]");
-        var secretInput = card.querySelector('[data-field="newApiSecret"]');
-        var secretLabel = card.querySelector('[data-label="newApiSecret"]');
-        var secretHelp = card.querySelector('[data-slot="new-api-secret-help"]');
-        var clearSecret = card.querySelector('[data-field="clearNewApiSecret"]');
-        var clearSecretRow = card.querySelector('[data-slot="clear-new-api-secret"]');
-
-        card.querySelectorAll("[data-auth-panel]").forEach(function (panel) {
-          panel.hidden = panel.dataset.authPanel !== mode;
-        });
-        secretGroup.hidden = mode === "api_key";
-        secretLabel.textContent = mode === "access_token" ? "用户 Access Token" : "New API 登录密码";
-        secretInput.setAttribute("autocomplete", mode === "password" ? "current-password" : "off");
-        clearSecretRow.hidden = mode === "api_key";
-        clearSecret.disabled = !account.newApiSecretConfigured;
-        secretInput.disabled = mode === "api_key";
-        secretInput.placeholder = account.newApiSecretConfigured && !mustReplaceSecret
-          ? "已保存；留空则保留"
-          : (mode === "access_token" ? "输入上游生成的用户 Access Token" : "输入上游登录密码");
-        secretHelp.textContent = account.clearNewApiSecret
-          ? "已选择清除。若要继续使用此认证方式，请取消清除并填写新的秘密。"
-          : (account.newApiSecret.trim()
-            ? "已填写新秘密；保存后不会在页面中回显。"
-            : (mustReplaceSecret
-              ? "认证方式、用户名或用户 ID 已变化，必须填写与新身份匹配的秘密。"
-              : (account.newApiSecretConfigured
-                ? "秘密不会回显。留空将保留原值，输入新值将替换原值。"
-                : "该认证方式尚未保存秘密；保存前必须填写。")));
-      }
-
-      function updateAccountHTTPWarning(card, account) {
-        var warning = card.querySelector('[data-slot="http-warning"]');
-        var insecure = account.baseUrl.trim().toLowerCase().indexOf("http://") === 0;
-        setTextIfChanged(warning, insecure
-          ? "安全风险：" + (account.name.trim() || "此账号") + " 使用明文 HTTP。路由请求时，API Key、余额认证凭据、提示词、代码和响应可能被窃听；建议尽快改用 HTTPS。"
-          : "");
-        setHiddenIfChanged(warning, !insecure);
-      }
-
-      function accountHasUsableModelConfig(account) {
-        return !validateURL(account.baseUrl.trim()) &&
-          (account.apiKey.trim() !== "" || (account.keyConfigured && !account.clearApiKey));
-      }
-
-      function savedAccountModelsReady(account) {
-        return !!account.id && accountHasUsableModelConfig(account) &&
-          account.baseUrl.trim() === account._savedBaseUrl &&
-          account.apiKey.trim() === "" && !account.clearApiKey;
-      }
-
-      function accountModelsText(account) {
-        if (account._modelsState === "loading") return "正在获取…";
-        if (account._modelsState === "ready") return account._models.join("、");
-        if (account._modelsState === "empty") return "上游未返回模型";
-        if (account._modelsState === "error") return "获取失败" + (account._modelsError ? "：" + account._modelsError : "");
-        if (account._modelsState === "stale") return "配置已修改，需刷新";
-        if (account._modelsState === "incomplete") return account.id ? "配置未完整，无法获取" : "配置未完整，保存后自动获取";
-        return "尚未获取";
-      }
-
-      function updateAccountModels(card, account) {
-        var modelElement = card && card.querySelector('[data-slot="models"]');
-        if (modelElement) {
-          setTextIfChanged(modelElement, accountModelsText(account));
-        }
-      }
-
-      function invalidateAccountModels(account) {
-        account._models = [];
-        account._modelsError = "";
-        account._modelsRequestId = (account._modelsRequestId || 0) + 1;
-        account._modelsState = accountHasUsableModelConfig(account) ? "stale" : "incomplete";
-        var card = findCard(accountUIID(account));
-        var resultElement = card && card.querySelector('[data-slot="models-result"]');
-        if (resultElement) {
-          resultElement.className = "test-result";
-          resultElement.textContent = "";
-        }
-      }
-
-      function renderAccounts() {
-        elements.accountList.replaceChildren();
-        elements.emptyState.hidden = config.accounts.length !== 0;
-
-        config.accounts.forEach(function (account, index) {
-          var card = elements.accountTemplate.content.firstElementChild.cloneNode(true);
-          var editor = card.querySelector('[data-slot="editor"]');
-          var editorTitle = card.querySelector('[data-slot="editor-title"]');
-          var editButton = card.querySelector('[data-action="edit"]');
-          var enabledInput = card.querySelector('[data-field="enabled"]');
-          var nameInput = card.querySelector('[data-field="name"]');
-          var urlInput = card.querySelector('[data-field="baseUrl"]');
-          var keyInput = card.querySelector('[data-field="apiKey"]');
-          var clearInput = card.querySelector('[data-field="clearApiKey"]');
-          var newAPIAuthModeInput = card.querySelector('[data-field="newApiAuthMode"]');
-          var newAPIUsernameInput = card.querySelector('[data-field="newApiUsername"]');
-          var newAPIUserIDInput = card.querySelector('[data-field="newApiUserId"]');
-          var newAPISecretInput = card.querySelector('[data-field="newApiSecret"]');
-          var clearNewAPISecretInput = card.querySelector('[data-field="clearNewApiSecret"]');
-          var editorId = "account-" + (index + 1) + "-editor";
-          var editorTitleId = editorId + "-title";
-          var uiID = accountUIID(account);
-
-          card.dataset.accountId = uiID;
-          card.querySelector('[data-slot="priority"]').textContent = String(index + 1);
-          card.querySelector('[data-slot="priority"]').setAttribute("aria-label", "优先级 " + (index + 1));
-          card.querySelector('[data-slot="name"]').textContent = account.name.trim() || "未命名账号";
-          card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
-          card.querySelector('[data-slot="key-state"]').textContent = (account.keyConfigured ? "服务器已保存 API Key" : "尚未保存 API Key") +
-            (account.newApiSecretConfigured ? " · 已保存余额认证秘密" : "");
-
-          enabledInput.checked = account.enabled;
-          enabledInput.dataset.accountId = uiID;
-          nameInput.value = account.name;
-          nameInput.dataset.accountId = uiID;
-          urlInput.value = account.baseUrl;
-          urlInput.dataset.accountId = uiID;
-          keyInput.value = account.apiKey;
-          keyInput.dataset.accountId = uiID;
-          clearInput.checked = account.clearApiKey;
-          clearInput.dataset.accountId = uiID;
-          clearInput.disabled = !account.keyConfigured;
-          keyInput.disabled = account.clearApiKey;
-          keyInput.placeholder = account.keyConfigured ? "已保存；留空则保留" : "输入此账号的 API Key";
-          card.querySelector('[data-slot="key-help"]').textContent = account.keyConfigured
-            ? "Key 不会回显。留空将保留原值，输入新值将替换原值。"
-            : "此账号尚未配置 Key；保存新账号前必须填写。";
-
-          newAPIAuthModeInput.value = account.newApiAuthMode;
-          newAPIAuthModeInput.dataset.accountId = uiID;
-          newAPIUsernameInput.value = account.newApiUsername;
-          newAPIUsernameInput.dataset.accountId = uiID;
-          newAPIUserIDInput.value = account.newApiUserId > 0 ? String(account.newApiUserId) : "";
-          newAPIUserIDInput.dataset.accountId = uiID;
-          newAPISecretInput.value = account.newApiSecret;
-          newAPISecretInput.dataset.accountId = uiID;
-          clearNewAPISecretInput.checked = account.clearNewApiSecret;
-          clearNewAPISecretInput.dataset.accountId = uiID;
-
-          setFieldIdentity(card, index, "name");
-          setFieldIdentity(card, index, "baseUrl");
-          setFieldIdentity(card, index, "apiKey");
-          setFieldIdentity(card, index, "newApiAuthMode");
-          setFieldIdentity(card, index, "newApiUsername");
-          setFieldIdentity(card, index, "newApiUserId");
-          setFieldIdentity(card, index, "newApiSecret");
-          updateNewAPIAuthFields(card, account);
-
-          editor.id = editorId;
-          editorTitle.id = editorTitleId;
-          editorTitle.textContent = account.id ? "编辑账号" : "添加账号";
-          editor.setAttribute("aria-labelledby", editorTitleId);
-          editor.addEventListener("close", function () {
-            window.setTimeout(function () {
-              var active = document.activeElement;
-              if (!active || active === document.body || active.closest("[hidden], dialog:not([open])")) {
-                var currentCard = findCard(uiID);
-                var returnButton = currentCard && currentCard.querySelector('[data-action="edit"]');
-                if (returnButton) {
-                  returnButton.focus();
-                }
-              }
-            }, 0);
-          });
-          editButton.setAttribute("aria-controls", editorId);
-          editButton.setAttribute("aria-haspopup", "dialog");
-
-          card.querySelectorAll("button[data-action]").forEach(function (button) {
-            button.dataset.accountId = uiID;
-          });
-          card.querySelector('[data-action="move-up"]').disabled = index === 0;
-          card.querySelector('[data-action="move-down"]').disabled = index === config.accounts.length - 1;
-          card.querySelector('[data-action="reset"]').disabled = getStatusAccount(account.id) === null;
-          card.querySelector('[data-action="resume"]').disabled = getStatusAccount(account.id) === null;
-          updateAccountControlLabels(card, account, index);
-          updateAccountHTTPWarning(card, account);
-
-          elements.accountList.appendChild(card);
-          updateAccountStatus(card, account);
-          updateAccountModels(card, account);
-        });
-        updatePageInteractivity();
-      }
-
-      function accountRuntimeConfigChanged(account) {
-        return !account.id || (
-          account.baseUrl.trim() !== account._savedBaseUrl ||
-          account.enabled !== account._savedEnabled ||
-          account.apiKey.trim() !== "" ||
-          account.clearApiKey ||
-          account.newApiAuthMode !== account._savedNewApiAuthMode ||
-          account.newApiUsername.trim() !== account._savedNewApiUsername ||
-          account.newApiUserId !== account._savedNewApiUserId ||
-          account.newApiSecret.trim() !== "" ||
-          account.clearNewApiSecret
-        );
-      }
-
-      function updateAccountStatus(card, account) {
-        var accountStatus = getStatusAccount(account.id);
-        var stateElement = card.querySelector('[data-slot="state"]');
-        var state = account.enabled ? "unknown" : "disabled";
-
-        if (accountRuntimeConfigChanged(account)) {
-          var isNewAccount = !account.id;
-          stateElement.textContent = stateLabels.pending_changes;
-          stateElement.className = "tag warning";
-          stateElement.title = isNewAccount
-            ? "新账号尚未保存"
-            : "URL、Key、余额认证或启用状态尚未保存；运行状态仍对应服务器中的旧配置";
-          card.querySelector('[data-slot="balance"]').textContent = isNewAccount
-            ? "保存后获取"
-            : formatBalance(accountStatus && accountStatus.balance) + "（服务器已保存配置）";
-          card.querySelector('[data-slot="requests"]').textContent = isNewAccount
-            ? "—"
-            : formatInteger(accountStatus && accountStatus.assignedRequests);
-          card.querySelector('[data-slot="last-used"]').textContent = isNewAccount
-            ? "—"
-            : formatDateTime(accountStatus && accountStatus.lastUsedAt, "尚未使用");
-          card.querySelector('[data-slot="health"]').textContent = isNewAccount ? "尚未保存" : "当前运行状态对应旧配置";
-          var pendingResetButton = card.querySelector('[data-action="reset"]');
-          if (pendingResetButton) {
-            pendingResetButton.disabled = true;
-            pendingResetButton.title = "请先保存当前账号配置";
-          }
-          var pendingResumeButton = card.querySelector('[data-action="resume"]');
-          if (pendingResumeButton) {
-            pendingResumeButton.hidden = true;
-            pendingResumeButton.disabled = true;
-          }
-          return;
-        }
-
-        if (account.enabled && accountStatus && typeof accountStatus.state === "string") {
-          state = accountStatus.state;
-          if (state === "available" && typeof accountStatus.healthState === "string" && stateLabels[accountStatus.healthState]) {
-            state = accountStatus.healthState;
-          }
-        }
-
-        stateElement.textContent = stateLabels[state] || state || "状态未知";
-        stateElement.className = "tag";
-        if (state === "recent_success" || state === "active") {
-          stateElement.classList.add("success");
-        } else if (state === "cooldown" || state === "cooling_down" || state === "unverified" || state === "unknown" || state === "incomplete") {
-          stateElement.classList.add("warning");
-        } else if (state === "recent_failure" || state === "temporarily_disabled" || state === "exhausted" || state === "quota_exhausted" || state === "unavailable" || state === "invalid" || state === "blocked") {
-          stateElement.classList.add("danger");
-        }
-        stateElement.title = accountStatus
-          ? "路由状态：" + (stateLabels[accountStatus.state] || accountStatus.state || "状态未知") +
-            "；近期连通性：" + (stateLabels[accountStatus.healthState] || accountStatus.healthState || "待验证") +
-            (accountStatus.state === "available" ? "；可参与路由不代表模型请求当前可用" : "")
-          : "服务端状态：" + (state || "unknown");
-
-        card.querySelector('[data-slot="balance"]').textContent = formatBalance(accountStatus && accountStatus.balance);
-        card.querySelector('[data-slot="requests"]').textContent = formatInteger(accountStatus && accountStatus.assignedRequests);
-        card.querySelector('[data-slot="last-used"]').textContent = formatDateTime(accountStatus && accountStatus.lastUsedAt, "尚未使用");
-        card.querySelector('[data-slot="health"]').textContent = formatHealth(accountStatus);
-
-        var resetButton = card.querySelector('[data-action="reset"]');
-        if (resetButton) {
-          resetButton.disabled = !accountStatus;
-          resetButton.title = accountStatus ? "发送真实模型请求；仅验证成功后清除阻止或冷却状态" : "此账号尚未保存";
-        }
-        var resumeButton = card.querySelector('[data-action="resume"]');
-        if (resumeButton) {
-          var canResume = Boolean(accountStatus && accountStatus.cooldownUntil &&
-            accountStatus.cooldownReason === "upstream_failures" && accountStatus.upstreamFailures > 0);
-          resumeButton.hidden = !canResume;
-          resumeButton.disabled = !canResume;
-          resumeButton.title = canResume ? "清除临时停用和连续失败计数；不发送测试请求" : "账号当前未因请求失败过多而暂时停用";
-        }
-      }
-
-      function balanceStatusValue(balance) {
-        if (!balance || typeof balance !== "object") {
-          return "unknown";
-        }
-        if (typeof balance.status === "string" && balance.status) {
-          return balance.status;
-        }
-        return typeof balance.state === "string" && balance.state ? balance.state : "unknown";
-      }
-
-      function balanceRefreshStatusValue(balance) {
-        if (!balance || typeof balance !== "object") {
-          return "";
-        }
-        return typeof balance.refreshStatus === "string" ? balance.refreshStatus : "";
-      }
-
-      function balanceStatusFailed(value) {
-        return value === "error" || value === "failed" || value === "unavailable" ||
-          value === "auth_error" || value === "timeout" || value === "partial" || value === "canceled";
-      }
-
-      function balanceErrorText(balance, retryScheduled) {
-        var state = balanceStatusValue(balance);
-        var refreshState = balanceRefreshStatusValue(balance);
-        var stage = typeof balance.errorStage === "string" ? balance.errorStage : "";
-        var code = typeof balance.errorCode === "string" ? balance.errorCode : "";
-        var stageLabel = balanceErrorStageLabels[stage] || "";
-        var detail = balanceErrorCodeLabels[code] || "";
-        if (!detail && (state === "auth_error" || stage === "account_auth" || stage === "account_login")) {
-          detail = balanceStateLabels.auth_error;
-        }
-        if (!detail && (state === "unsupported" || refreshState === "unsupported")) {
-          detail = balanceStateLabels.unsupported;
-        }
-        if (!detail && (state === "pending" || refreshState === "pending")) {
-          return balanceStateLabels.pending;
-        }
-        if (!detail && refreshState === "partial") {
-          detail = "部分余额来源查询失败";
-        }
-        if (!detail && balanceStatusFailed(refreshState)) {
-          detail = "余额刷新失败";
-        }
-        if (!detail) {
-          detail = balanceStateLabels[state] || "余额获取失败";
-        }
-        var result = stageLabel ? stageLabel + "：" + detail : detail;
-        if (retryScheduled !== false && balance.retryable === true && balanceStatusFailed(refreshState || state)) {
-          result += "，将自动重试";
-        }
-        return result;
-      }
-
-      function formatBalanceRefreshWarning(result, balance) {
-        var refreshState = balanceRefreshStatusValue(balance);
-        if (!balanceStatusFailed(refreshState)) {
-          return result;
-        }
-        if (refreshState === "partial" && (balance.scope === "token_only" || balance.scope === "account_only")) {
-          return result + "（本次仅取得部分余额来源：" + balanceErrorText(balance) + "）";
-        }
-        return result + "（最近刷新失败：" + balanceErrorText(balance) + "；显示上次成功结果）";
-      }
-
-      function formatBalance(balance) {
-        if (!balance || typeof balance !== "object") {
-          return "未知（尚无数据）";
-        }
-        var state = balanceStatusValue(balance);
-        var refreshState = balanceRefreshStatusValue(balance);
-        if (balanceStatusFailed(state) || ((state === "unknown" || state === "not_checked") && balanceStatusFailed(refreshState))) {
-          return balanceErrorText(balance);
-        }
-        if (state === "unknown" || state === "not_checked" || state === "unsupported" || state === "unavailable" || state === "error" || state === "auth_error" || state === "pending") {
-          return state === "unsupported" ? balanceErrorText(balance) : (balanceStateLabels[state] || "未知（不按 0 计算）");
-        }
-        if (balance.unlimited === true && balance.limitedBy !== "account") {
-          if (balance.scope === "token_only") {
-            return formatBalanceRefreshWarning("Token 无限（账号余额未验证）", balance);
-          }
-          return formatBalanceRefreshWarning("无限" + (balance.displayLabel ? " · " + String(balance.displayLabel) : ""), balance);
-        }
-        var amount = balance.remaining;
-        if (amount === null || typeof amount === "undefined") {
-          amount = balance.amount;
-        }
-        if (amount === null || typeof amount === "undefined" || amount === "") {
-          return "未知（不按 0 计算）";
-        }
-        var remaining = amount;
-        if (typeof remaining === "number" && Number.isFinite(remaining)) {
-          remaining = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(remaining);
-        } else {
-          remaining = String(remaining);
-        }
-        var unit = balance.displayLabel || (balance.unit === "display_unit" ? "" : balance.unit);
-        var result = unit ? remaining + " " + String(unit) : remaining;
-        if (balance.scope === "token_only") {
-          result += "（仅 Token 额度，账号余额未验证）";
-        } else if (balance.scope === "account_only") {
-          result += "（仅账号余额，Token 额度未验证）";
-        } else if (balance.limitedBy === "account") {
-          result += "（账号余额限制）";
-        } else if (balance.limitedBy === "token") {
-          result += "（Token 额度限制）";
-        }
-        if (balance.fresh === false && balance.updatedAt) {
-          result += "（已过期）";
-        }
-        return formatBalanceRefreshWarning(result, balance);
-      }
-
-      function formatInteger(value) {
-        if (typeof value !== "number" || !Number.isFinite(value)) {
-          return "0";
-        }
-        return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
-      }
-
-      function formatDateTime(value, fallback) {
-        if (!value) {
-          return fallback;
-        }
-        var date = new Date(value);
-        if (Number.isNaN(date.getTime())) {
-          return String(value);
-        }
-        return new Intl.DateTimeFormat("zh-CN", {
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit"
-        }).format(date);
-      }
-
-      function formatHealth(accountStatus) {
-        if (!accountStatus) {
-          return "尚未保存";
-        }
-        if (accountStatus.cooldownUntil) {
-          if (accountStatus.cooldownReason === "upstream_failures" && accountStatus.upstreamFailures >= 3) {
-            return "账号请求失败过多，暂时停用至 " + formatDateTime(accountStatus.cooldownUntil, String(accountStatus.cooldownUntil));
-          }
-          return "冷却至 " + formatDateTime(accountStatus.cooldownUntil, String(accountStatus.cooldownUntil));
-        }
-        if (accountStatus.blockedReason) {
-          var blockedLabels = {
-            quota: "额度耗尽",
-            unauthorized: "Key 无效",
-            restricted: "账号受限或停用"
-          };
-          return "已阻止：" + (blockedLabels[accountStatus.blockedReason] || String(accountStatus.blockedReason));
-        }
-        if (accountStatus.healthState === "recent_success") {
-          return "近期验证通过";
-        }
-        if (accountStatus.healthState === "recent_failure") {
-          return "最近请求或测试失败";
-        }
-        if (accountStatus.healthState === "unverified") {
-          return accountStatus.verified ? "曾成功响应（历史记录），当前状态待验证" : "当前状态待验证";
-        }
-        return accountStatus.verified ? "曾成功响应（历史记录）" : "当前状态待验证";
-      }
-
-      function updateStatusUI() {
-        var effective = status.effectiveStrategy || status.strategy || "priority";
-        var configured = status.strategy || "priority";
-        elements.summaryStrategy.textContent = strategyLabels[effective] || effective;
-        elements.summaryAccounts.textContent = status.availableAccounts + " / " + status.totalAccounts;
-        elements.summaryLastAccount.textContent = status.lastRoutedAccountName || status.lastRoutedAccountId || "尚无请求";
-        elements.summaryLastAccount.title = status.lastRoutedAccountId ? "账号 ID：" + status.lastRoutedAccountId : "";
-
-        var selected = config.strategy;
-        var savedStrategyDiffers = selected !== configured;
-        var configuredUsesBalance = configured === "highest_balance" || configured === "lowest_balance";
-        var selectedUsesBalance = selected === "highest_balance" || selected === "lowest_balance";
-        var effectiveText = "服务当前实际执行：" + (strategyLabels[effective] || effective) + "。";
-        if (savedStrategyDiffers) {
-          effectiveText += " 页面中选择的“" + (strategyLabels[selected] || selected) + "”尚未保存。";
-        }
-        if (configuredUsesBalance || selectedUsesBalance) {
-          effectiveText += " 只有全部路由候选的实际余额都已验证且可比较时才执行余额策略；否则整体回退到最少使用优先，Token-only 或未知余额不会按 0 处理。账面余额仅用于排序，不代表模型请求当前可用。";
-        }
-        setTextIfChanged(elements.effectiveStrategyNotice, effectiveText);
-
-        var hasFallback = configuredUsesBalance && (effective !== configured || status.fallbackReason);
-        setHiddenIfChanged(elements.fallbackWarning, !hasFallback);
-        if (hasFallback) {
-          var reasonCode = status.fallbackReason || "";
-          var reason = fallbackReasonLabels[reasonCode] || reasonCode || "当前没有足够的已知余额数据";
-          setTextIfChanged(elements.fallbackWarning, "“" + (strategyLabels[configured] || configured) + "”当前无法直接决策，已实际回退为“" +
-            (strategyLabels[effective] || effective) + "”。原因：" + reason + "。未知余额没有被当作 0。");
-        }
-
-        config.accounts.forEach(function (account) {
-          var card = findCard(accountUIID(account));
-          if (card) {
-            updateAccountStatus(card, account);
-          }
-        });
-      }
-
-      function updateStrategyDescription() {
-        elements.strategyHelp.textContent = strategyDescriptions[config.strategy] || "";
-        updateStatusUI();
-      }
-
-      function clearFieldErrors(card) {
-        card.querySelectorAll("[aria-invalid]").forEach(function (field) {
-          field.removeAttribute("aria-invalid");
-        });
-        card.querySelectorAll(".field-error").forEach(function (error) {
-          error.hidden = true;
-          error.textContent = "";
-        });
-      }
-
-      function setFieldError(card, fieldName, message) {
-        var field = card.querySelector('[data-field="' + fieldName + '"]');
-        var error = card.querySelector('[data-error="' + fieldName + '"]');
-        if (field) {
-          field.setAttribute("aria-invalid", "true");
-        }
-        if (error) {
-          error.textContent = message;
-          error.hidden = false;
-        }
-      }
-
-      function validateURL(value) {
-        var parsed;
-        try {
-          parsed = new URL(value);
-        } catch (error) {
-          return "请输入完整的 http:// 或 https:// 地址";
-        }
-        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.host) {
-          return "地址必须使用 http:// 或 https://";
-        }
-        if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-          return "地址不能包含用户信息、查询参数或片段";
-        }
-        return "";
-      }
-
-      function validateAccount(account, options) {
-        var card = findCard(accountUIID(account));
-        var firstInvalid = null;
-        var requireKey = options && options.requireKey === true;
-        var validateBalanceAuth = !(options && options.skipNewAPIAuth === true);
-        if (card) {
-          clearFieldErrors(card);
-        }
-
-        if (!account.name.trim()) {
-          if (card) {
-            setFieldError(card, "name", "请填写账号名称");
-          }
-          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="name"]'));
-        }
-
-        var urlError = validateURL(account.baseUrl.trim());
-        if (urlError) {
-          if (card) {
-            setFieldError(card, "baseUrl", urlError);
-          }
-          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="baseUrl"]'));
-        }
-
-        var hasUsableKey = account.apiKey.trim() !== "" || (account.keyConfigured && !account.clearApiKey);
-        if ((requireKey || account.enabled || !account.id) && !hasUsableKey) {
-          if (card) {
-            setFieldError(card, "apiKey", account.id
-              ? "已启用账号必须保留已保存的 Key，或填写一个新 Key"
-              : "新账号必须填写 API Key");
-          }
-          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="apiKey"]'));
-        }
-
-        if (validateBalanceAuth && !newAPIAuthModes[account.newApiAuthMode]) {
-          if (card) {
-            setFieldError(card, "newApiAuthMode", "请选择有效的 New API 余额认证方式");
-          }
-          firstInvalid = firstInvalid || (card && card.querySelector('[data-field="newApiAuthMode"]'));
-        } else if (validateBalanceAuth && (account.newApiAuthMode === "password" || account.newApiAuthMode === "access_token")) {
-          if (account.newApiAuthMode === "password" && !account.newApiUsername.trim()) {
-            if (card) {
-              setFieldError(card, "newApiUsername", "请填写 New API 登录用户名");
-            }
-            firstInvalid = firstInvalid || (card && card.querySelector('[data-field="newApiUsername"]'));
-          }
-          if (account.newApiAuthMode === "access_token" && (!Number.isSafeInteger(account.newApiUserId) || account.newApiUserId <= 0)) {
-            if (card) {
-              setFieldError(card, "newApiUserId", "请填写正整数 New API 用户 ID");
-            }
-            firstInvalid = firstInvalid || (card && card.querySelector('[data-field="newApiUserId"]'));
-          }
-          var authIdentifierChanged = newAPIAuthIdentifierChanged(account);
-          var hasUsableNewAPISecret = account.newApiSecret.trim() !== "" ||
-            (account.newApiSecretConfigured && !account.clearNewApiSecret && !authIdentifierChanged);
-          if (!hasUsableNewAPISecret) {
-            if (card) {
-              setFieldError(card, "newApiSecret", account.clearNewApiSecret
-                ? "已选择清除认证秘密；请取消清除并填写新值，或改用 API Key 方式"
-                : (authIdentifierChanged
-                  ? "认证方式、用户名或用户 ID 变化后必须重新填写对应秘密"
-                  : "请填写此认证方式需要的秘密"));
-            }
-            firstInvalid = firstInvalid || (card && card.querySelector('[data-field="newApiSecret"]'));
-          }
-        }
-
-        return firstInvalid;
-      }
-
-      function validateAllAccounts() {
-        var firstInvalid = null;
-        config.accounts.forEach(function (account) {
-          var invalid = validateAccount(account);
-          firstInvalid = firstInvalid || invalid;
-        });
-
-        if (firstInvalid) {
-          var card = firstInvalid.closest(".account-card");
-          showGlobalError("部分账号配置不完整，请修正标出的字段。");
-          if (card) {
-            var account = getAccount(card.dataset.accountId);
-            if (account) {
-              openAccountEditor(account);
-            }
-          }
-          firstInvalid.focus();
-          return null;
-        }
-        return config.accounts;
-      }
-
-      function httpURLs(accounts) {
-        return accounts.map(function (account) {
-          return account.baseUrl.trim();
-        }).filter(function (value, index, list) {
-          return value.toLowerCase().indexOf("http://") === 0 && list.indexOf(value) === index;
-        });
-      }
-
-      function confirmHTTPRisk(urls) {
-        if (urls.length === 0) {
-          return Promise.resolve(true);
-        }
-        elements.httpRiskList.replaceChildren();
-        urls.forEach(function (url) {
-          var item = document.createElement("li");
-          item.textContent = url;
-          elements.httpRiskList.appendChild(item);
-        });
-
-        return new Promise(function (resolve) {
-          function onClose() {
-            resolve(elements.httpRiskDialog.returnValue === "confirm");
-          }
-          elements.httpRiskDialog.addEventListener("close", onClose, { once: true });
-          if (typeof elements.httpRiskDialog.showModal === "function") {
-            elements.httpRiskDialog.returnValue = "";
-            elements.httpRiskDialog.showModal();
-          } else {
-            resolve(window.confirm("检测到明文 HTTP 地址。API Key、余额认证凭据、提示词、代码和响应可能被窃听。是否仍要继续？"));
-          }
-        });
-      }
-
-      function saveAccountPayload(account) {
-        return {
-          id: account.id,
-          name: account.name.trim(),
-          baseUrl: account.baseUrl.trim(),
-          enabled: account.enabled,
-          apiKey: account.apiKey,
-          clearApiKey: account.clearApiKey,
-          newApiAuthMode: account.newApiAuthMode,
-          newApiUsername: account.newApiUsername.trim(),
-          newApiUserId: account.newApiUserId,
-          newApiSecret: account.newApiAuthMode === "api_key" ? "" : account.newApiSecret,
-          clearNewApiSecret: account.clearNewApiSecret
-        };
-      }
-
-      function candidatePayload(account) {
-        return {
-          id: account.id,
-          name: account.name.trim(),
-          baseUrl: account.baseUrl.trim(),
-          enabled: account.enabled,
-          apiKey: account.apiKey,
-          clearApiKey: account.clearApiKey,
-          newApiAuthMode: account.newApiAuthMode,
-          newApiUsername: account.newApiUsername.trim(),
-          newApiUserId: account.newApiUserId,
-          newApiSecret: account.newApiAuthMode === "api_key" ? "" : account.newApiSecret,
-          clearNewApiSecret: account.clearNewApiSecret
-        };
-      }
-
-      async function api(path, options) {
-        var requestOptions = Object.assign({ cache: "no-store" }, options || {});
-        requestOptions.headers = Object.assign({ "Accept": "application/json" }, requestOptions.headers || {});
-        if (requestOptions.body !== undefined) {
-          requestOptions.headers["Content-Type"] = "application/json";
-        }
-        if (requestOptions.method && requestOptions.method !== "GET") {
-          requestOptions.headers["X-CSRF-Token"] = csrfToken;
-        }
-
-        var response = await fetch(path, requestOptions);
-        var text = await response.text();
-        var data = {};
-        if (text) {
-          try {
-            data = JSON.parse(text);
-          } catch (error) {
-            data = { message: text };
-          }
-        }
-        if (!response.ok) {
-          var message = data.error || data.message || ("请求失败，HTTP " + response.status);
-          var apiError = new Error(message);
-          apiError.status = response.status;
-          apiError.data = data;
-          throw apiError;
-        }
-        return data;
-      }
-
-      function setButtonBusy(button, busyText) {
-        var original = button.textContent;
-        var originallyDisabled = button.disabled;
-        button.disabled = true;
-        button.textContent = busyText;
-        button.setAttribute("aria-busy", "true");
-        return function () {
-          button.textContent = original;
-          button.removeAttribute("aria-busy");
-          if (pageBusy || !pageReady) {
-            if (button.hasAttribute("data-page-lock-disabled")) {
-              button.dataset.pageLockDisabled = String(originallyDisabled);
-            }
-            button.disabled = true;
-          } else {
-            button.disabled = originallyDisabled;
-          }
-        };
-      }
-
-      async function loadBootstrap(options) {
-        var opts = options || {};
-        var wasReady = pageReady;
-        var failure = "";
-        clearGlobalError();
-        setPageBusy(true);
-        setServiceState("loading", "正在连接");
-        try {
-          var data = await api("/admin/bootstrap");
-          csrfToken = typeof data.csrfToken === "string" ? data.csrfToken : "";
-          config = normalizeConfig(data.config);
-          status = normalizeStatus(data.status);
-          pageReady = true;
-          codexSnippet = typeof data.codexSnippet === "string"
-            ? data.codexSnippet
-            : (data.codexSnippet && data.codexSnippet.snippet) || "";
-          elements.strategy.value = config.strategy;
-          renderAccounts();
-          updateStrategyDescription();
-          markClean();
-          setServiceState("online", "服务在线");
-          refreshSavedAccountModels();
-        } catch (error) {
-          pageReady = wasReady;
-          setServiceState("offline", "连接失败");
-          failure = "无法加载管理配置：" + error.message;
-        } finally {
-          setPageBusy(false);
-        }
-        if (failure) {
-          showGlobalError(failure);
-        } else if (opts.announce) {
-          announce("已重新加载服务器配置");
-        }
-      }
-
-      function refreshStatus(silent) {
-        if (!pageReady || pageBusy || balanceRefreshPromise) {
-          return Promise.resolve();
-        }
-        if (statusRefreshPromise) {
-          return statusRefreshPromise;
-        }
-        statusRefreshPromise = (async function () {
-          try {
-            var data = await api("/admin/status");
-            status = normalizeStatus(data.status || data);
-            updateStatusUI();
-            setServiceState("online", "服务在线");
-            if (!silent) {
-              announce("状态已刷新");
-            }
-          } catch (error) {
-            setServiceState("offline", "连接失败");
-            if (!silent) {
-              showGlobalError("无法刷新状态：" + error.message);
-            }
-          }
-        }()).finally(function () {
-          statusRefreshPromise = null;
-        });
-        return statusRefreshPromise;
-      }
-
-      async function saveAll() {
-        clearGlobalError();
-        var accounts = validateAllAccounts();
-        if (!accounts) {
-          return;
-        }
-        var insecureURLs = httpURLs(accounts);
-
-        var restoreButton = setButtonBusy(elements.saveButton, "正在保存…");
-        var outcome = "";
-        var failure = "";
-        setPageBusy(true);
-        try {
-          var data = await api("/admin/config", {
-            method: "PUT",
-            body: JSON.stringify({
-              strategy: config.strategy,
-              allowInsecureHttp: insecureURLs.length > 0,
-              accounts: accounts.map(saveAccountPayload)
-            })
-          });
-
-          config = normalizeConfig(data.config);
-          status = normalizeStatus(data.status);
-          if (typeof data.codexSnippet === "string") {
-            codexSnippet = data.codexSnippet;
-          }
-          elements.strategy.value = config.strategy;
-          renderAccounts();
-          updateStrategyDescription();
-          markClean();
-          setServiceState("online", "服务在线");
-          refreshSavedAccountModels();
-          outcome = data.message || "全部配置已保存";
-        } catch (error) {
-          failure = "保存失败：" + error.message;
-        } finally {
-          setPageBusy(false);
-          restoreButton();
-        }
-        if (failure) {
-          showGlobalError(failure);
-          announce("保存失败");
-        } else {
-          setTextIfChanged(elements.balanceRefreshResult, outcome + "，正在查询余额…");
-          announce(outcome + "，正在查询余额");
-          await refreshBalances({ trigger: "save" });
-        }
-      }
-
-      async function testAccountBalance(account, button) {
-        clearGlobalError();
-        var firstInvalid = validateAccount(account, { requireKey: true });
-        if (firstInvalid) {
-          firstInvalid.focus();
-          announce("请先修正 " + (account.name || "该账号") + " 的配置");
-          return;
-        }
-
-        var urls = httpURLs([account]);
-        var confirmed = await confirmHTTPRisk(urls);
-        if (!confirmed) {
-          announce("已取消余额查询");
-          return;
-        }
-
-        var card = findCard(accountUIID(account));
-        var resultElement = card && card.querySelector('[data-slot="test-result"]');
-        var restoreButton = setButtonBusy(button, "正在查询…");
-        if (resultElement) {
-          resultElement.className = "test-result";
-          resultElement.textContent = "正在查询当前填写内容对应的余额…";
-        }
-
-        try {
-          var data = await api("/admin/balances/test", {
-            method: "POST",
-            body: JSON.stringify({
-              accountId: account.id,
-              candidate: candidatePayload(account),
-              allowInsecureHttp: urls.length > 0
-            })
-          });
-          var report = data.report && typeof data.report === "object"
-            ? data.report
-            : (Array.isArray(data.reports) && data.reports[0] && typeof data.reports[0] === "object" ? data.reports[0] : {});
-          var reportBalance = report.balance && typeof report.balance === "object" ? report.balance : {};
-          var responseBalance = data.balance && typeof data.balance === "object" ? data.balance : {};
-          var balance = Object.assign({}, report, reportBalance, responseBalance);
-          var refreshState = balanceRefreshStatusValue(balance);
-          var partial = refreshState === "partial" && data.ok !== false;
-          var failed = data.ok === false || (!partial && (balanceStatusFailed(balanceStatusValue(balance)) || balanceStatusFailed(refreshState)));
-          var displayBalance = Object.assign({}, balance, { retryable: false });
-          var message = partial
-            ? "余额查询部分成功：" + formatBalance(displayBalance)
-            : (failed ? "余额查询失败：" + balanceErrorText(balance, false) : "余额查询成功：" + formatBalance(displayBalance));
-          if (resultElement) {
-            resultElement.className = failed ? "test-result danger" : "test-result success";
-            resultElement.textContent = message;
-          }
-          announce((account.name || "该账号") + "：" + message);
-          if (account.id && !accountRuntimeConfigChanged(account)) {
-            await refreshStatus(true);
-          }
-        } catch (error) {
-          var errorData = error.data && typeof error.data === "object" ? error.data : {};
-          var errorReport = errorData.report && typeof errorData.report === "object"
-            ? errorData.report
-            : (Array.isArray(errorData.reports) && errorData.reports[0] && typeof errorData.reports[0] === "object" ? errorData.reports[0] : errorData);
-          var failure = "余额查询失败：" + (errorReport.errorCode || errorReport.errorStage
-            ? balanceErrorText(errorReport, false)
-            : error.message);
-          if (resultElement) {
-            resultElement.className = "test-result danger";
-            resultElement.textContent = failure;
-          }
-          announce((account.name || "该账号") + " " + failure);
-        } finally {
-          restoreButton();
-        }
-      }
-
-      async function refreshAccountModels(account, button, options) {
-        var savedConfig = options && options.savedConfig === true;
-        if (!savedConfig) {
-          clearGlobalError();
-        }
-        var urls = [];
-        if (savedConfig) {
-          if (getAccount(accountUIID(account)) !== account || account._modelsState !== "idle" || !savedAccountModelsReady(account)) {
-            return;
-          }
-        } else {
-          var firstInvalid = validateAccount(account, { requireKey: true, skipNewAPIAuth: true });
-          if (firstInvalid) {
-            firstInvalid.focus();
-            announce("请先修正 " + (account.name || "该账号") + " 的配置");
-            return;
-          }
-          urls = httpURLs([account]);
-          var confirmed = await confirmHTTPRisk(urls);
-          if (!confirmed) {
-            announce("已取消支持模型获取");
-            return;
-          }
-        }
-
-        var card = findCard(accountUIID(account));
-        var resultElement = !savedConfig && card && card.querySelector('[data-slot="models-result"]');
-        var restoreButton = button ? setButtonBusy(button, "正在获取…") : function () {};
-        var requestId = (account._modelsRequestId || 0) + 1;
-        account._modelsRequestId = requestId;
-        account._models = [];
-        account._modelsError = "";
-        account._modelsState = "loading";
-        updateAccountModels(card, account);
-        if (resultElement) {
-          resultElement.className = "test-result";
-          resultElement.textContent = "正在获取当前填写内容支持的模型…";
-        }
-
-        try {
-          var payload = { accountId: account.id };
-          if (!savedConfig) {
-            payload.candidate = {
-              id: account.id,
-              name: account.name.trim(),
-              baseUrl: account.baseUrl.trim(),
-              apiKey: account.apiKey.trim(),
-              clearApiKey: account.clearApiKey
-            };
-            payload.allowInsecureHttp = urls.length > 0;
-          }
-          var data = await api("/admin/models", {
-            method: "POST",
-            body: JSON.stringify(payload)
-          });
-          if (getAccount(accountUIID(account)) !== account || account._modelsRequestId !== requestId) {
-            return;
-          }
-          account._models = Array.isArray(data.models) ? data.models.filter(function (model) {
-            return typeof model === "string" && model.trim();
-          }).map(function (model) {
-            return model.trim();
-          }) : [];
-          account._modelsState = account._models.length ? "ready" : "empty";
-          updateAccountModels(findCard(accountUIID(account)), account);
-          var message = account._models.length ? "支持模型已刷新，共 " + account._models.length + " 个。" : "上游未返回模型。";
-          if (resultElement) {
-            resultElement.className = "test-result success";
-            resultElement.textContent = message;
-          }
-          if (!savedConfig) {
-            announce((account.name || "该账号") + "：" + message);
-          }
-        } catch (error) {
-          if (getAccount(accountUIID(account)) !== account || account._modelsRequestId !== requestId) {
-            return;
-          }
-          account._models = [];
-          account._modelsState = "error";
-          account._modelsError = error.message;
-          updateAccountModels(findCard(accountUIID(account)), account);
-          var failure = "支持模型获取失败：" + error.message;
-          if (resultElement) {
-            resultElement.className = "test-result danger";
-            resultElement.textContent = failure;
-          }
-          if (!savedConfig) {
-            announce((account.name || "该账号") + " " + failure);
-          }
-        } finally {
-          restoreButton();
-        }
-      }
-
-      function refreshSavedAccountModels() {
-        var queue = config.accounts.slice();
-        var workers = [];
-        for (var index = 0; index < Math.min(3, queue.length); index += 1) {
-          workers.push((async function () {
-            while (queue.length) {
-              await refreshAccountModels(queue.shift(), null, { savedConfig: true });
-            }
-          }()));
-        }
-        return Promise.all(workers);
-      }
-
-      async function resetAccount(account, button) {
-        clearGlobalError();
-        var card = findCard(accountUIID(account));
-        var resultElement = card && card.querySelector('[data-slot="test-result"]');
-        var restoreButton = setButtonBusy(button, "正在验证…");
-        if (resultElement) {
-          resultElement.className = "test-result";
-          resultElement.textContent = "正在发送真实模型请求验证账号…";
-        }
-        try {
-          var data = await api("/admin/accounts/reset", {
-            method: "POST",
-            body: JSON.stringify({ id: account.id })
-          });
-          if (!data.status) {
-            throw new Error("服务未返回账号状态");
-          }
-          status = normalizeStatus(data.status);
-          updateStatusUI();
-          var successParts = [data.message || (account.name || "账号") + " 已验证并清除阻止或冷却状态"];
-          if (typeof data.model === "string" && data.model.trim()) {
-            successParts.push("模型 " + data.model.trim());
-          }
-          if (typeof data.statusCode === "number") {
-            successParts.push("HTTP " + data.statusCode);
-          }
-          if (typeof data.latencyMs === "number") {
-            successParts.push(data.latencyMs + " ms");
-          }
-          var message = successParts.join(" · ");
-          if (resultElement) {
-            resultElement.className = "test-result success";
-            resultElement.textContent = message;
-          }
-          announce(message);
-        } catch (error) {
-          var errorData = error.data && typeof error.data === "object" ? error.data : {};
-          if (errorData.status) {
-            status = normalizeStatus(errorData.status);
-            updateStatusUI();
-          }
-          var failureParts = ["验证失败"];
-          if (typeof errorData.statusCode === "number" && errorData.statusCode > 0) {
-            failureParts.push("HTTP " + errorData.statusCode);
-          }
-          if (typeof errorData.latencyMs === "number") {
-            failureParts.push(errorData.latencyMs + " ms");
-          }
-          failureParts.push(String(errorData.message || error.message));
-          var failure = failureParts.join(" · ");
-          if (resultElement) {
-            resultElement.className = "test-result danger";
-            resultElement.textContent = failure;
-          }
-          announce(failure);
-        } finally {
-          restoreButton();
-        }
-      }
-
-      async function resumeAccount(account, button) {
-        clearGlobalError();
-        var card = findCard(accountUIID(account));
-        var resultElement = card && card.querySelector('[data-slot="test-result"]');
-        var restoreButton = setButtonBusy(button, "正在恢复…");
-        try {
-          var data = await api("/admin/accounts/resume", {
-            method: "POST",
-            body: JSON.stringify({ id: account.id })
-          });
-          if (!data.status) {
-            throw new Error("服务未返回账号状态");
-          }
-          status = normalizeStatus(data.status);
-          updateStatusUI();
-          var message = data.message || (account.name || "账号") + " 已恢复，将从下一次请求起重新参与路由";
-          if (resultElement) {
-            resultElement.className = "test-result success";
-            resultElement.textContent = message;
-          }
-          announce(message);
-        } catch (error) {
-          var failure = "恢复失败：" + error.message;
-          if (resultElement) {
-            resultElement.className = "test-result danger";
-            resultElement.textContent = failure;
-          }
-          announce(failure);
-        } finally {
-          restoreButton();
-        }
-      }
-
-      function numericCount(source, names) {
-        if (!source || typeof source !== "object") {
-          return null;
-        }
-        for (var index = 0; index < names.length; index += 1) {
-          var value = source[names[index]];
-          if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-            return Math.floor(value);
-          }
-        }
-        return null;
-      }
-
-      function balanceReportView(report) {
-        var source = report && typeof report === "object" ? report : {};
-        var balance = source.balance && typeof source.balance === "object" ? source.balance : {};
-        return Object.assign({}, source, balance);
-      }
-
-      function balanceReportState(report) {
-        var view = balanceReportView(report);
-        var state = balanceStatusValue(view);
-        if (balanceStatusFailed(state) || state === "unsupported") {
-          return state;
-        }
-        var refreshState = balanceRefreshStatusValue(view);
-        return refreshState || state;
-      }
-
-      function balanceReportFailed(report) {
-        return balanceStatusFailed(balanceReportState(report));
-      }
-
-      function balanceReports(data) {
-        var payload = data && typeof data === "object" ? data : {};
-        if (Array.isArray(payload.reports)) return payload.reports;
-        if (Array.isArray(payload.results)) return payload.results;
-        if (!payload.status || !Array.isArray(payload.status.accounts)) {
-          return [];
-        }
-        return payload.status.accounts.map(function (account) {
-          var balance = account && account.balance && typeof account.balance === "object" ? account.balance : {};
-          return Object.assign({
-            accountId: account && account.id,
-            accountName: account && account.name
-          }, balance);
-        });
-      }
-
-      function balanceReportName(report) {
-        var source = report && typeof report === "object" ? report : {};
-        if (typeof source.accountName === "string" && source.accountName.trim()) {
-          return source.accountName.trim();
-        }
-        if (typeof source.name === "string" && source.name.trim()) {
-          return source.name.trim();
-        }
-        var id = source.accountId == null ? source.id : source.accountId;
-        var account = id == null ? null : getAccount(String(id));
-        return account && account.name.trim() ? account.name.trim() : "未命名账号";
-      }
-
-      function hasRetryableBalanceFailure(data) {
-        return balanceReports(data).some(function (report) {
-          return balanceReportFailed(report) && balanceReportView(report).retryable === true;
-        });
-      }
-
-      function retryableBalanceAccountIds(data) {
-        var seen = Object.create(null);
-        return balanceReports(data).reduce(function (ids, report) {
-          var view = balanceReportView(report);
-          var id = report && report.accountId != null ? report.accountId : view.accountId;
-          id = id == null ? "" : String(id).trim();
-          if (id && !seen[id] && balanceReportFailed(report) && view.retryable === true) {
-            seen[id] = true;
-            ids.push(id);
-          }
-          return ids;
-        }, []);
-      }
-
-      function balanceRefreshMessage(data) {
-        var payload = data && typeof data === "object" ? data : {};
-        var reports = balanceReports(payload);
-        if (reports.length) {
-          var reportCounts = { success: 0, partial: 0, failed: 0, unsupported: 0, skipped: 0 };
-          var failures = [];
-          reports.forEach(function (report) {
-            var state = balanceReportState(report);
-            if (state === "ok" || state === "success" || state === "succeeded" || state === "known" || state === "refreshed") {
-              reportCounts.success += 1;
-            } else if (state === "partial") {
-              reportCounts.partial += 1;
-              failures.push(report);
-            } else if (state === "unsupported") {
-              reportCounts.unsupported += 1;
-            } else if (balanceReportFailed(report)) {
-              reportCounts.failed += 1;
-              failures.push(report);
-            } else {
-              reportCounts.skipped += 1;
-            }
-          });
-          var reportPieces = ["成功 " + reportCounts.success, "失败 " + reportCounts.failed];
-          if (reportCounts.partial > 0) reportPieces.push("部分成功 " + reportCounts.partial);
-          if (reportCounts.unsupported > 0) reportPieces.push("不支持 " + reportCounts.unsupported);
-          if (reportCounts.skipped > 0) reportPieces.push("未检查 " + reportCounts.skipped);
-          var reportMessage = "余额刷新完成：" + reportPieces.join("，") + "。";
-          if (failures.length) {
-            var failureDetails = failures.slice(0, 3).map(function (report) {
-              return balanceReportName(report) + "（" + balanceErrorText(balanceReportView(report)) + "）";
-            });
-            reportMessage += " 失败账号：" + failureDetails.join("；") + (failures.length > 3 ? "；另有 " + (failures.length - 3) + " 个" : "") + "。";
-          }
-          return reportMessage;
-        }
-        if (typeof payload.summary === "string" && payload.summary.trim()) {
-          return payload.summary.trim();
-        }
-        if (typeof payload.balanceSummary === "string" && payload.balanceSummary.trim()) {
-          return payload.balanceSummary.trim();
-        }
-
-        var candidates = [payload.counts, payload.summary, payload.balanceCounts, payload.balanceSummary, payload];
-        var counts = null;
-        for (var index = 0; index < candidates.length; index += 1) {
-          var source = candidates[index];
-          var success = numericCount(source, ["success", "succeeded", "successful", "refreshed", "ok", "known"]);
-          var failed = numericCount(source, ["failed", "failure", "failures", "error", "errors"]);
-          var unsupported = numericCount(source, ["unsupported", "notSupported"]);
-          var skipped = numericCount(source, ["skipped", "unknown"]);
-          var total = numericCount(source, ["total", "checked", "processed"]);
-          if (success !== null || failed !== null || unsupported !== null || skipped !== null || total !== null) {
-            counts = { success: success, failed: failed, unsupported: unsupported, skipped: skipped, total: total };
-            break;
-          }
-        }
-
-        if (!counts && payload.status && Array.isArray(payload.status.accounts)) {
-          counts = { success: 0, failed: 0, unsupported: 0, skipped: 0, total: payload.status.accounts.length };
-          payload.status.accounts.forEach(function (account) {
-            var balance = account && account.balance && typeof account.balance === "object" ? account.balance : {};
-            var state = typeof balance.status === "string" ? balance.status : balance.state;
-            if (state === "ok" || state === "known") {
-              counts.success += 1;
-            } else if (state === "unsupported") {
-              counts.unsupported += 1;
-            } else if (state === "error" || state === "unavailable" || state === "auth_error") {
-              counts.failed += 1;
-            } else {
-              counts.skipped += 1;
-            }
-          });
-        }
-
-        if (counts) {
-          var pieces = [];
-          if (counts.success !== null) pieces.push("成功 " + counts.success);
-          if (counts.failed !== null) pieces.push("失败 " + counts.failed);
-          if (counts.unsupported !== null) pieces.push("不支持 " + counts.unsupported);
-          if (counts.skipped !== null && counts.skipped > 0) pieces.push("未检查 " + counts.skipped);
-          if (pieces.length === 0 && counts.total !== null) pieces.push("已处理 " + counts.total);
-          if (pieces.length > 0) {
-            return "余额刷新完成：" + pieces.join("，") + "。";
-          }
-        }
-        if (typeof payload.message === "string" && payload.message.trim()) {
-          return payload.message.trim();
-        }
-        return "余额刷新请求已完成，请查看各账号的余额状态。";
-      }
-
-      function stopBalancePoll() {
-        if (balancePollTimer) {
-          window.clearTimeout(balancePollTimer);
-          balancePollTimer = 0;
-        }
-      }
-
-      function startStatusPoll() {
-        if (pollTimer) {
-          window.clearInterval(pollTimer);
-        }
-        pollTimer = window.setInterval(function () {
-          if (!document.hidden) {
-            refreshStatus(true);
-          }
-        }, 15000);
-      }
-
-      function scheduleBalancePoll(delay, trigger) {
-        stopBalancePoll();
-        if (!pageReady || document.hidden) {
-          return;
-        }
-        balancePollTimer = window.setTimeout(function () {
-          refreshBalances({ trigger: trigger || "poll" });
-        }, typeof delay === "number" ? delay : balancePollInterval);
-      }
-
-      function balanceRetryPlan(retryable) {
-        if (retryable && balanceRetryAttempt < balanceRetryDelays.length) {
-          var delay = balanceRetryDelays[balanceRetryAttempt];
-          balanceRetryAttempt += 1;
-          return {
-            delay: delay,
-            trigger: "retry",
-            notice: " 将在 " + Math.round(delay / 1000) + " 秒后自动重试。"
-          };
-        }
-        balanceRetryAttempt = 0;
-        return { delay: balancePollInterval, trigger: "poll", notice: "" };
-      }
-
-      function balanceRefreshTime() {
-        return new Intl.DateTimeFormat("zh-CN", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }).format(new Date());
-      }
-
-      async function refreshBalances(options) {
-        var trigger = options && typeof options.trigger === "string" ? options.trigger : "manual";
-        var quiet = trigger === "poll" || trigger === "retry";
-        if (balanceRefreshPromise) {
-          if (quiet) {
-            return balanceRefreshPromise;
-          }
-          await balanceRefreshPromise;
-        }
-        if (!pageReady || pageBusy) {
-          scheduleBalancePoll(trigger === "retry" ? balanceRetryDelays[0] : balancePollInterval, trigger === "retry" ? "retry" : "poll");
-          return;
-        }
-        stopBalancePoll();
-        if (!quiet) {
-          clearGlobalError();
-        }
-        var busyText = trigger === "save" ? "保存后刷新中…" : (trigger === "retry" ? "自动重试中…" : (trigger === "poll" ? "自动刷新中…" : "正在刷新…"));
-        var restoreButton = setButtonBusy(elements.refreshBalancesButton, busyText);
-        if (trigger === "manual") {
-          setTextIfChanged(elements.balanceRefreshResult, dirty
-            ? "正在刷新服务器已保存配置的余额；未保存编辑不会参与本次刷新…"
-            : "正在刷新已保存配置的余额…");
-        }
-        var nextPlan = { delay: balancePollInterval, trigger: "poll", notice: "" };
-        var task = (async function () {
-          try {
-            if (statusRefreshPromise) {
-              await statusRefreshPromise;
-            }
-            var refreshRequest = {};
-            if (trigger === "retry" && balanceRetryAccountIds.length) {
-              refreshRequest.accountIds = balanceRetryAccountIds.slice();
-            }
-            var data = await api("/admin/balances/refresh" + (trigger === "poll" ? "?automatic=1" : ""), {
-              method: "POST",
-              body: JSON.stringify(refreshRequest)
-            });
-            if (data.status) {
-              status = normalizeStatus(data.status);
-              updateStatusUI();
-            } else {
-              await refreshStatus(true);
-            }
-            balanceRetryAccountIds = retryableBalanceAccountIds(data);
-            nextPlan = balanceRetryPlan(balanceRetryAccountIds.length > 0 || hasRetryableBalanceFailure(data));
-            var message = balanceRefreshMessage(data) + nextPlan.notice;
-            if (trigger === "poll") {
-              setTextIfChanged(elements.balanceRefreshResult, "最近自动刷新 " + balanceRefreshTime() + "。" + message);
-            } else if (trigger === "retry") {
-              setTextIfChanged(elements.balanceRefreshResult, "最近自动重试 " + balanceRefreshTime() + "。" + message);
-            } else {
-              setTextIfChanged(elements.balanceRefreshResult, message);
-              announce(message);
-            }
-            return data;
-          } catch (error) {
-            if (trigger !== "retry") {
-              balanceRetryAccountIds = [];
-            }
-            nextPlan = balanceRetryPlan(true);
-            var failure = "刷新余额请求失败：" + error.message + nextPlan.notice;
-            setTextIfChanged(elements.balanceRefreshResult, failure);
-            if (!quiet) {
-              showGlobalError(failure);
-              announce("余额刷新失败");
-            }
-            return null;
-          }
-        }());
-        balanceRefreshPromise = task;
-        try {
-          return await task;
-        } finally {
-          if (balanceRefreshPromise === task) {
-            balanceRefreshPromise = null;
-          }
-          restoreButton();
-          scheduleBalancePoll(nextPlan.delay, nextPlan.trigger);
-        }
-      }
-
-      function addAccount() {
-        var account = {
-          id: "",
-          _uiId: newAccountId(),
-          name: "",
-          baseUrl: "",
-          enabled: true,
-          keyConfigured: false,
-          apiKey: "",
-          clearApiKey: false,
-          newApiAuthMode: "api_key",
-          _savedNewApiAuthMode: "api_key",
-          newApiUsername: "",
-          _savedNewApiUsername: "",
-          newApiUserId: 0,
-          _savedNewApiUserId: 0,
-          newApiSecretConfigured: false,
-          newApiSecret: "",
-          clearNewApiSecret: false,
-          _models: [],
-          _modelsState: "incomplete",
-          _modelsError: "",
-          _modelsRequestId: 0
-        };
-        config.accounts.push(account);
-        markDirty();
-        renderAccounts();
-        updateStatusUI();
-        openAccountEditor(account);
-        announce("已添加新账号，请填写账号名称");
-      }
-
-      function deleteAccount(account) {
-        var name = account.name.trim() || "未命名账号";
-        if (!window.confirm("确认删除“" + name + "”吗？保存全部配置后才会从服务器删除。")) {
-          return;
-        }
-        var index = getAccountIndex(accountUIID(account));
-        if (index < 0) {
-          return;
-        }
-        var nextFocusAccount = config.accounts[index + 1] || config.accounts[index - 1] || null;
-        var nextFocusID = nextFocusAccount ? accountUIID(nextFocusAccount) : "";
-        closeAccountEditor(account);
-        config.accounts.splice(index, 1);
-        markDirty();
-        renderAccounts();
-        updateStatusUI();
-        var nextCard = nextFocusID ? findCard(nextFocusID) : null;
-        var nextButton = nextCard && nextCard.querySelector('[data-action="edit"]');
-        if (nextButton) {
-          nextButton.focus();
-        } else {
-          elements.addAccountButton.focus();
-        }
-        announce("已从待保存配置中删除 " + name + "，当前有未保存更改");
-      }
-
-      function moveAccount(account, direction, sourceAction) {
-        var index = getAccountIndex(accountUIID(account));
-        var target = index + direction;
-        if (index < 0 || target < 0 || target >= config.accounts.length) {
-          return;
-        }
-        config.accounts.splice(index, 1);
-        config.accounts.splice(target, 0, account);
-        markDirty();
-        renderAccounts();
-        updateStatusUI();
-        var card = findCard(accountUIID(account));
-        var focusTarget = card && card.querySelector('[data-action="' + sourceAction + '"]');
-        if (focusTarget && !focusTarget.disabled) {
-          focusTarget.focus();
-        } else if (card) {
-          card.querySelector('[data-action="edit"]').focus();
-        }
-        announce((account.name || "未命名账号") + " 已移动到第 " + (target + 1) + " 位，当前有未保存更改");
-      }
-
-      function openAccountEditor(account) {
-        var card = findCard(accountUIID(account));
-        var editor = card && card.querySelector('[data-slot="editor"]');
-        if (!editor || editor.open) {
-          return;
-        }
-        if (typeof editor.showModal === "function") {
-          editor.showModal();
-        } else {
-          editor.setAttribute("open", "");
-        }
-        var nameInput = editor.querySelector('[data-field="name"]');
-        if (nameInput) {
-          nameInput.focus();
-        }
-      }
-
-      function closeAccountEditor(account) {
-        var card = findCard(accountUIID(account));
-        var editor = card && card.querySelector('[data-slot="editor"]');
-        if (!editor || !editor.open) {
-          return;
-        }
-        if (typeof editor.close === "function") {
-          editor.close();
-        } else {
-          editor.removeAttribute("open");
-        }
-      }
-
-      function handleAccountInput(event) {
-        var field = event.target.dataset.field;
-        var id = event.target.dataset.accountId;
-        if (!field || !id) {
-          return;
-        }
-        var account = getAccount(id);
-        if (!account) {
-          return;
-        }
-        var card = findCard(id);
-        event.target.removeAttribute("aria-invalid");
-        var relatedError = card.querySelector('[data-error="' + field + '"]');
-        if (relatedError) {
-          relatedError.hidden = true;
-          relatedError.textContent = "";
-        }
-        if (field === "enabled" || field === "clearApiKey") {
-          var keyError = card.querySelector('[data-error="apiKey"]');
-          var keyField = card.querySelector('[data-field="apiKey"]');
-          keyField.removeAttribute("aria-invalid");
-          keyError.hidden = true;
-          keyError.textContent = "";
-        }
-        if (field === "newApiAuthMode" || field === "newApiUsername" || field === "newApiUserId" ||
-            field === "clearNewApiSecret") {
-          ["newApiUsername", "newApiUserId", "newApiSecret"].forEach(function (relatedField) {
-            var input = card.querySelector('[data-field="' + relatedField + '"]');
-            var error = card.querySelector('[data-error="' + relatedField + '"]');
-            input.removeAttribute("aria-invalid");
-            error.hidden = true;
-            error.textContent = "";
-          });
-        }
-
-        if (field === "enabled") {
-          account.enabled = event.target.checked;
-        } else if (field === "clearApiKey") {
-          account.clearApiKey = event.target.checked;
-          var keyInput = card.querySelector('[data-field="apiKey"]');
-          if (account.clearApiKey) {
-            account.apiKey = "";
-            keyInput.value = "";
-          }
-          keyInput.disabled = account.clearApiKey;
-        } else if (field === "clearNewApiSecret") {
-          account.clearNewApiSecret = event.target.checked;
-          if (account.clearNewApiSecret) {
-            account.newApiSecret = "";
-            card.querySelector('[data-field="newApiSecret"]').value = "";
-          }
-        } else if (field === "newApiUserId") {
-          account.newApiUserId = event.target.value === "" ? 0 : Number(event.target.value);
-        } else {
-          account[field] = event.target.value;
-          if (field === "apiKey" && event.target.value) {
-            account.clearApiKey = false;
-            var clearInput = card.querySelector('[data-field="clearApiKey"]');
-            clearInput.checked = false;
-          }
-          if (field === "newApiSecret" && event.target.value) {
-            account.clearNewApiSecret = false;
-            card.querySelector('[data-field="clearNewApiSecret"]').checked = false;
-          }
-        }
-
-        if (field === "name") {
-          card.querySelector('[data-slot="name"]').textContent = account.name.trim() || "未命名账号";
-          updateAccountControlLabels(card, account, getAccountIndex(id));
-        }
-        if (field === "baseUrl") {
-          card.querySelector('[data-slot="url"]').textContent = account.baseUrl.trim() || "尚未填写 URL";
-        }
-        if (field === "baseUrl" || field === "apiKey" || field === "clearApiKey") {
-          invalidateAccountModels(account);
-          updateAccountModels(card, account);
-        }
-        if (field === "newApiAuthMode" || field === "newApiUsername" || field === "newApiUserId" ||
-            field === "clearNewApiSecret" || field === "newApiSecret") {
-          updateNewAPIAuthFields(card, account);
-        }
-        updateAccountHTTPWarning(card, account);
-        updateAccountStatus(card, account);
-        markDirty();
-      }
-
-      function handleAccountAction(event) {
-        var button = event.target.closest("button[data-action]");
-        if (!button || !elements.accountList.contains(button)) {
-          return;
-        }
-        var account = getAccount(button.dataset.accountId);
-        if (!account) {
-          return;
-        }
-        var action = button.dataset.action;
-        if (action === "edit") {
-          openAccountEditor(account);
-        } else if (action === "close-editor") {
-          closeAccountEditor(account);
-        } else if (action === "move-up") {
-          moveAccount(account, -1, "move-up");
-        } else if (action === "move-down") {
-          moveAccount(account, 1, "move-down");
-        } else if (action === "delete") {
-          deleteAccount(account);
-        } else if (action === "test-balance") {
-          testAccountBalance(account, button);
-        } else if (action === "models") {
-          refreshAccountModels(account, button);
-        } else if (action === "resume") {
-          resumeAccount(account, button);
-        } else if (action === "reset") {
-          resetAccount(account, button);
-        }
-      }
-
-      async function copyCodexConfig() {
-        var restoreButton = setButtonBusy(elements.copyCodexButton, "正在复制…");
-        try {
-          if (!codexSnippet) {
-            throw new Error("当前没有可复制的配置");
-          }
-          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-            await navigator.clipboard.writeText(codexSnippet);
-          } else {
-            var textarea = document.createElement("textarea");
-            textarea.value = codexSnippet;
-            textarea.setAttribute("readonly", "");
-            textarea.className = "visually-hidden";
-            document.body.appendChild(textarea);
-            textarea.select();
-            if (!document.execCommand("copy")) {
-              throw new Error("浏览器拒绝访问剪贴板");
-            }
-            textarea.remove();
-          }
-          announce("Codex 用户级配置已复制");
-        } catch (error) {
-          showGlobalError("复制失败：" + error.message);
-        } finally {
-          restoreButton();
-        }
-      }
-
-      async function rotateGatewayToken() {
-        if (!window.confirm("更换后旧 Token 会立即失效。请随后重新复制并更新 Codex 配置。确定更换吗？")) {
-          return;
-        }
-        clearGlobalError();
-        var restoreButton = setButtonBusy(elements.rotateGatewayTokenButton, "正在更换…");
-        var previousSnippet = codexSnippet;
-        var failure = "";
-        setPageBusy(true);
-        try {
-          var data = await api("/admin/config", {
-            method: "PUT",
-            body: JSON.stringify({ rotateGatewayToken: true })
-          });
-          if (typeof data.codexSnippet !== "string" || !data.codexSnippet) {
-            throw new Error("服务端未返回新的配置");
-          }
-          codexSnippet = data.codexSnippet;
-        } catch (error) {
-          try {
-            var latest = await api("/admin/codex-config");
-            var latestSnippet = latest && typeof latest.snippet === "string" ? latest.snippet : "";
-            if (!latestSnippet) {
-              throw new Error("服务端未返回当前配置");
-            }
-            codexSnippet = latestSnippet;
-            if (latestSnippet === previousSnippet) {
-              failure = "更换 Token 失败：" + error.message;
-            }
-          } catch (refreshError) {
-            codexSnippet = "";
-            failure = "无法确认 Token 是否已更换，请重新加载页面";
-          }
-        } finally {
-          setPageBusy(false);
-          restoreButton();
-        }
-        if (failure) {
-          showGlobalError(failure);
-          announce("Token 更换失败");
-        } else {
-          announce("Token 已更换，请重新复制配置");
-        }
-      }
-
-      elements.strategy.addEventListener("change", function () {
-        config.strategy = elements.strategy.value;
-        markDirty();
-        updateStrategyDescription();
-      });
-
-      elements.accountList.addEventListener("input", handleAccountInput);
-      elements.accountList.addEventListener("change", handleAccountInput);
-      elements.accountList.addEventListener("click", handleAccountAction);
-      elements.addAccountButton.addEventListener("click", addAccount);
-      elements.emptyAddButton.addEventListener("click", addAccount);
-      elements.refreshBalancesButton.addEventListener("click", function () {
-        refreshBalances({ trigger: "manual" });
-      });
-      elements.saveButton.addEventListener("click", saveAll);
-      elements.rotateGatewayTokenButton.addEventListener("click", rotateGatewayToken);
-      elements.copyCodexButton.addEventListener("click", copyCodexConfig);
-
-      elements.reloadButton.addEventListener("click", function () {
-        if (dirty && !window.confirm("放弃所有未保存更改并重新加载服务器配置吗？")) {
-          return;
-        }
-        loadBootstrap({ announce: true }).then(function () {
-          if (pageReady && !document.hidden) {
-            refreshBalances({ trigger: "poll" });
-          }
-        });
-      });
-
-      window.addEventListener("beforeunload", function (event) {
-        if (!dirty) {
-          return;
-        }
-        event.preventDefault();
-        event.returnValue = "";
-      });
-
-      document.addEventListener("visibilitychange", function () {
-        if (document.hidden) {
-          stopBalancePoll();
-          setTextIfChanged(elements.balanceRefreshResult, "余额自动刷新已暂停；返回页面后继续。");
-        } else {
-          refreshBalances({ trigger: "poll" });
-        }
-      });
-
-      updatePageInteractivity();
-      loadBootstrap().then(function () {
-        if (pageReady && !document.hidden) {
-          refreshBalances({ trigger: "poll" });
-        }
-      });
-      startStatusPoll();
-
-      window.addEventListener("pagehide", function () {
-        stopBalancePoll();
-        if (pollTimer) {
-          window.clearInterval(pollTimer);
-          pollTimer = 0;
-        }
-      });
-
-      window.addEventListener("pageshow", function (event) {
-        if (event.persisted && pageReady && !document.hidden) {
-          startStatusPoll();
-          refreshBalances({ trigger: "poll" });
-        }
-      });
-    }());
-  </script>
+  <script type="module" src="/assets/js/main.mjs"></script>
 </body>
 </html>

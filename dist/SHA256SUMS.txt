@@ -1,4 +1,0 @@
-dd1863aa02ea67cf2f8ef9542f793d421b0be1cdfe873cdf0ef7ef988ace2dd1  codex-quota-router-darwin-amd64-v0.2.1.tar.gz
-282636284fd9801854f07a29dce4904617a636d57295bc060e8b5aec1c5229c4  codex-quota-router-darwin-arm64-v0.2.1.tar.gz
-e53c4563ac4885784eb734171d1f83fe2664e3c5992623bcda501b2980aeb76f  codex-quota-router-linux-amd64-v0.2.1.tar.gz
-6adde7202136eb17126f6ef4d3b70f35c4cfad3fcfea06df250683afcf65f3c8  codex-quota-router-windows-amd64-v0.2.1.zip
